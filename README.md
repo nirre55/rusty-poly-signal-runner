@@ -54,12 +54,15 @@ Variables principales :
 | `STRATEGY` | Nom de la stratégie. | `three_candle_rsi7_reversal` |
 | `SYMBOL` | Symbole Binance, ex. `btcusdt`, `ethusdt`. | `btcusdt` |
 | `INTERVAL` | Intervalle Binance, ex. `5m`, `15m`. | `5m` |
-| `POLYMARKET_SLUG_PREFIX` | Préfixe du slug Polymarket. | `btc-updown-5m` |
+| `POLYMARKET_SLUG_PREFIX` | Préfixe du slug Polymarket pour le format `timestamp`. | `btc-updown-5m` |
+| `POLYMARKET_SLUG_FORMAT` | Format du slug Polymarket: `timestamp` pour 5m/15m, `hourly_et` pour les marches 1h. | `timestamp` |
+| `POLYMARKET_SLUG_ASSET` | Asset utilise avec `hourly_et`, ex. `bitcoin`, `solana`. Si absent, derive de `SYMBOL`. | Selon `SYMBOL` |
 | `POLYMARKET_API_URL` | URL CLOB Polymarket. | `https://clob.polymarket.com` |
 | `TRADE_AMOUNT_USDC` | Montant fixe par trade. | `10.0` |
 | `TRADE_AMOUNT_PCT` | Pourcentage du solde USDC à utiliser. Mutuellement exclusif avec `TRADE_AMOUNT_USDC`. | `0.0` |
 | `ENSEMBLE_MIN_VOTES` | Nombre minimal de votes pour les stratégies ensemble. | `1` |
-| `LIMIT_PRICE_OFFSET` | Offset ajouté au meilleur ask en mode `limit`. | `0.01` |
+| `LIMIT_PRICE_REFERENCE` | Prix de reference des ordres limite: `best_ask` ou `best_bid`. | `best_ask` |
+| `LIMIT_PRICE_OFFSET` | Offset signe ajoute au prix de reference en mode `limit`, ex. `0.01`, `0`, `-0.01`. | `0.01` |
 | `MARTINGALE_MULTIPLIER` | Multiplicateur après une perte. `1.0` désactive la martingale. | `1.0` |
 | `MARTINGALE_MAX_AMOUNT` | Plafond martingale. `0.0` désactive le plafond. | `0.0` |
 | `EXCLUDED_DAYS` | Jours exclus, ex. `sat,sun`. | Vide |
@@ -67,6 +70,24 @@ Variables principales :
 | `LOGS_DIR` | Dossier des logs et états runtime. | `logs` |
 
 Variables nécessaires aux modes réels :
+
+Pour les marches 1h Polymarket dont les slugs ressemblent a
+`bitcoin-up-or-down-may-21-2026-11am-et`, utilisez :
+
+```env
+INTERVAL=1h
+POLYMARKET_SLUG_FORMAT=hourly_et
+POLYMARKET_SLUG_ASSET=bitcoin
+```
+
+Pour Solana :
+
+```env
+SYMBOL=solusdt
+INTERVAL=1h
+POLYMARKET_SLUG_FORMAT=hourly_et
+POLYMARKET_SLUG_ASSET=solana
+```
 
 | Variable | Description |
 |---|---|
@@ -94,10 +115,22 @@ Lancer les quatre stratégies ensemble :
 .\start_all.ps1
 ```
 
-ou :
+Par defaut, le script PowerShell fait un `cargo build --release` une seule fois, puis lance chaque strategie dans une fenetre separee avec l'executable compile, auto-restart, et logs console dans `logs/supervisor/*.console.log`.
+
+Sur Ubuntu/server :
 
 ```bash
-./start_all.sh
+./start_all.sh start
+./start_all.sh status
+./start_all.sh stop
+```
+
+Variables utiles pour le script Linux :
+
+```bash
+CARGO_PROFILE=debug ./start_all.sh start
+NO_RESTART=1 ./start_all.sh start
+RESTART_DELAY_SECONDS=30 ./start_all.sh restart
 ```
 
 ## Logs et états

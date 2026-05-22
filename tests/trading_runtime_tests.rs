@@ -1,7 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use rusty_poly_streak_rsi::binance::Candle;
-use rusty_poly_streak_rsi::config::{Config, ExecutionMode, MarketOrderType};
+use rusty_poly_streak_rsi::config::{
+    Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+};
 use rusty_poly_streak_rsi::logger::TradeLogger;
 use rusty_poly_streak_rsi::money::MoneyManager;
 use rusty_poly_streak_rsi::polymarket::{MarketInfo, OrderResult};
@@ -41,12 +43,15 @@ fn make_config(logs_dir: &str) -> Config {
         rsi_overbought: 65.0,
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
+        polymarket_slug_format: PolymarketSlugFormat::Timestamp,
+        polymarket_slug_asset: "bitcoin".to_string(),
         martingale_multiplier: 1.0,
         martingale_max_amount: 0.0,
         trade_amount_pct: 0.0,
         excluded_days: Vec::new(),
         excluded_hours: Vec::new(),
         ensemble_min_votes: 1,
+        limit_price_reference: LimitPriceReference::BestAsk,
         limit_price_offset: 0.01,
         market_order_type: MarketOrderType::Fok,
     }

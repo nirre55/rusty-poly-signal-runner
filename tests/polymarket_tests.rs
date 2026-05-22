@@ -1,9 +1,14 @@
+use chrono::TimeZone;
 use chrono::Utc;
-use rusty_poly_streak_rsi::config::{Config, ExecutionMode, MarketOrderType};
+use rusty_poly_streak_rsi::config::{
+    Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+};
 use rusty_poly_streak_rsi::polymarket::{
     calculate_available_shares_up_to_price, calculate_limit_order_quote, parse_best_ask_body,
-    parse_gamma_market_body, parse_market_ws_best_ask_message, parse_order_execution_details_body,
-    parse_order_status_body, validate_sufficient_usdc_balance, MarketInfo, PolymarketClient,
+    parse_best_bid_body, parse_book_reference_price_body, parse_gamma_market_body,
+    parse_market_ws_best_ask_message, parse_market_ws_reference_price_message,
+    parse_order_execution_details_body, parse_order_status_body, validate_sufficient_usdc_balance,
+    MarketInfo, PolymarketClient,
 };
 use rusty_poly_streak_rsi::strategy::{Prediction, Signal};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,12 +32,15 @@ fn make_config(mode: ExecutionMode) -> Config {
         rsi_overbought: 65.0,
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
+        polymarket_slug_format: PolymarketSlugFormat::Timestamp,
+        polymarket_slug_asset: "bitcoin".to_string(),
         martingale_multiplier: 1.0,
         martingale_max_amount: 0.0,
         trade_amount_pct: 0.0,
         excluded_days: Vec::new(),
         excluded_hours: Vec::new(),
         ensemble_min_votes: 1,
+        limit_price_reference: LimitPriceReference::BestAsk,
         limit_price_offset: 0.01,
         market_order_type: MarketOrderType::Fok,
     }
@@ -94,6 +102,32 @@ fn test_build_slug_different_candles_produce_different_slugs() {
     let slug1 = PolymarketClient::build_slug("btc-updown-5m", 1710000000000);
     let slug2 = PolymarketClient::build_slug("btc-updown-5m", 1710000300000);
     assert_ne!(slug1, slug2);
+}
+
+#[test]
+fn test_build_hourly_et_slug_formats_polymarket_hourly_market() {
+    let open_time_ms = Utc
+        .with_ymd_and_hms(2026, 5, 21, 17, 0, 0)
+        .unwrap()
+        .timestamp_millis();
+
+    assert_eq!(
+        PolymarketClient::build_hourly_et_slug("solana", open_time_ms),
+        Some("solana-up-or-down-may-21-2026-1pm-et".to_string())
+    );
+}
+
+#[test]
+fn test_build_hourly_et_slug_handles_morning_hour() {
+    let open_time_ms = Utc
+        .with_ymd_and_hms(2026, 5, 21, 15, 0, 0)
+        .unwrap()
+        .timestamp_millis();
+
+    assert_eq!(
+        PolymarketClient::build_hourly_et_slug("bitcoin", open_time_ms),
+        Some("bitcoin-up-or-down-may-21-2026-11am-et".to_string())
+    );
 }
 
 #[test]
@@ -165,6 +199,26 @@ fn test_parse_best_ask_body_returns_none_for_empty_book() {
 }
 
 #[test]
+fn test_parse_best_bid_body_returns_highest_bid_price() {
+    let body = r#"{"bids":[{"price":"0.30"},{"price":"0.33"},{"price":"0.31"}]}"#;
+
+    assert_eq!(parse_best_bid_body(body), Some(0.33));
+}
+
+#[test]
+fn test_parse_book_reference_price_body_supports_best_bid() {
+    let body = r#"{
+        "asks":[{"price":"0.35"},{"price":"0.34"}],
+        "bids":[{"price":"0.31"},{"price":"0.33"}]
+    }"#;
+
+    assert_eq!(
+        parse_book_reference_price_body(body, LimitPriceReference::BestBid),
+        Some(0.33)
+    );
+}
+
+#[test]
 fn test_parse_market_ws_best_ask_message_supports_best_bid_ask() {
     let body = r#"{
         "event_type":"best_bid_ask",
@@ -176,6 +230,21 @@ fn test_parse_market_ws_best_ask_message_supports_best_bid_ask() {
     assert_eq!(
         parse_market_ws_best_ask_message("token-up", body),
         Some(0.53)
+    );
+}
+
+#[test]
+fn test_parse_market_ws_reference_price_message_supports_best_bid() {
+    let body = r#"{
+        "event_type":"best_bid_ask",
+        "asset_id":"token-up",
+        "best_bid":"0.50",
+        "best_ask":"0.53"
+    }"#;
+
+    assert_eq!(
+        parse_market_ws_reference_price_message("token-up", body, LimitPriceReference::BestBid),
+        Some(0.50)
     );
 }
 
@@ -261,6 +330,20 @@ fn test_calculate_limit_order_quote_adjusts_to_min_size() {
     assert_eq!(quote.limit_price, 0.41000000000000003);
     assert_eq!(quote.effective_usdc, 2.06);
     assert!(quote.adjusted_to_min_size);
+}
+
+#[test]
+fn test_calculate_limit_order_quote_accepts_negative_offset() {
+    let quote = calculate_limit_order_quote(10.0, 5.0, Some(0.55), -0.02);
+
+    assert_eq!(quote.limit_price, 0.53);
+}
+
+#[test]
+fn test_calculate_limit_order_quote_clamps_negative_offset_to_min_price() {
+    let quote = calculate_limit_order_quote(10.0, 5.0, Some(0.02), -0.05);
+
+    assert_eq!(quote.limit_price, 0.01);
 }
 
 #[test]

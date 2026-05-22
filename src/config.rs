@@ -34,6 +34,36 @@ impl MarketOrderType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitPriceReference {
+    BestAsk,
+    BestBid,
+}
+
+impl LimitPriceReference {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LimitPriceReference::BestAsk => "best_ask",
+            LimitPriceReference::BestBid => "best_bid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolymarketSlugFormat {
+    Timestamp,
+    HourlyEt,
+}
+
+impl PolymarketSlugFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PolymarketSlugFormat::Timestamp => "timestamp",
+            PolymarketSlugFormat::HourlyEt => "hourly_et",
+        }
+    }
+}
+
 // P13 : impl Debug manuel pour masquer les secrets dans les logs
 #[derive(Clone)]
 pub struct Config {
@@ -63,6 +93,10 @@ pub struct Config {
     pub rsi_oversold: f64,
     /// Préfixe slug Polymarket (ex: "btc-updown-5m"). Format final: {prefix}-{timestamp}
     pub polymarket_slug_prefix: String,
+    /// Format du slug Polymarket: timestamp ou hourly_et.
+    pub polymarket_slug_format: PolymarketSlugFormat,
+    /// Asset utilise pour les slugs hourly_et, ex: bitcoin, solana.
+    pub polymarket_slug_asset: String,
     /// Multiplicateur Martingale après chaque loss. 1.0 = désactivé. Défaut: 1.0
     pub martingale_multiplier: f64,
     /// Montant maximum Martingale en USDC. 0.0 = pas de plafond. Défaut: 0.0
@@ -76,7 +110,9 @@ pub struct Config {
     pub excluded_hours: Vec<(u32, u32)>,
     /// Nombre minimum de votes pour la stratégie ensemble. Défaut: 1
     pub ensemble_min_votes: u32,
-    /// Offset ajouté au meilleur ask pour les ordres limite (ex: 0.01). Défaut: 0.01
+    /// Prix de reference des ordres limite: best_ask ou best_bid. Defaut: best_ask
+    pub limit_price_reference: LimitPriceReference,
+    /// Offset signe ajoute au prix de reference (ex: 0.01, 0, -0.01). Defaut: 0.01
     pub limit_price_offset: f64,
     pub market_order_type: MarketOrderType,
 }
@@ -100,15 +136,28 @@ impl std::fmt::Debug for Config {
             .field("rsi_overbought", &self.rsi_overbought)
             .field("rsi_oversold", &self.rsi_oversold)
             .field("polymarket_slug_prefix", &self.polymarket_slug_prefix)
+            .field("polymarket_slug_format", &self.polymarket_slug_format)
+            .field("polymarket_slug_asset", &self.polymarket_slug_asset)
             .field("martingale_multiplier", &self.martingale_multiplier)
             .field("martingale_max_amount", &self.martingale_max_amount)
             .field("trade_amount_pct", &self.trade_amount_pct)
             .field("excluded_days", &self.excluded_days)
             .field("excluded_hours", &self.excluded_hours)
             .field("ensemble_min_votes", &self.ensemble_min_votes)
+            .field("limit_price_reference", &self.limit_price_reference)
             .field("limit_price_offset", &self.limit_price_offset)
             .field("market_order_type", &self.market_order_type)
             .finish()
+    }
+}
+
+fn default_slug_asset(symbol: &str) -> String {
+    let symbol = symbol.trim().to_ascii_lowercase();
+    match symbol.as_str() {
+        "btcusdt" | "btc" => "bitcoin".to_string(),
+        "ethusdt" | "eth" => "ethereum".to_string(),
+        "solusdt" | "sol" => "solana".to_string(),
+        other => other.strip_suffix("usdt").unwrap_or(other).to_string(),
     }
 }
 
@@ -143,6 +192,20 @@ impl Config {
             "fak" => MarketOrderType::Fak,
             other => anyhow::bail!(
                 "MARKET_ORDER_TYPE '{}' non reconnu - valeurs acceptees: fok, fak",
+                other
+            ),
+        };
+
+        let limit_price_reference = match env::var("LIMIT_PRICE_REFERENCE")
+            .unwrap_or_else(|_| "best_ask".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "best_ask" | "ask" => LimitPriceReference::BestAsk,
+            "best_bid" | "bid" => LimitPriceReference::BestBid,
+            other => anyhow::bail!(
+                "LIMIT_PRICE_REFERENCE '{}' non reconnu - valeurs acceptees: best_ask, best_bid",
                 other
             ),
         };
@@ -223,6 +286,23 @@ impl Config {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(35.0);
 
+        let symbol = env::var("SYMBOL").unwrap_or_else(|_| "btcusdt".to_string());
+        let polymarket_slug_format = match env::var("POLYMARKET_SLUG_FORMAT")
+            .unwrap_or_else(|_| "timestamp".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "timestamp" | "unix" | "updown_timestamp" => PolymarketSlugFormat::Timestamp,
+            "hourly_et" | "hourly" | "et_hourly" => PolymarketSlugFormat::HourlyEt,
+            other => anyhow::bail!(
+                "POLYMARKET_SLUG_FORMAT '{}' non reconnu - valeurs acceptees: timestamp, hourly_et",
+                other
+            ),
+        };
+        let polymarket_slug_asset =
+            env::var("POLYMARKET_SLUG_ASSET").unwrap_or_else(|_| default_slug_asset(&symbol));
+
         let excluded_days = env::var("EXCLUDED_DAYS")
             .unwrap_or_default()
             .split(',')
@@ -256,7 +336,7 @@ impl Config {
         let config = Config {
             binance_ws_url: env::var("BINANCE_WS_URL")
                 .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws".to_string()),
-            symbol: env::var("SYMBOL").unwrap_or_else(|_| "btcusdt".to_string()),
+            symbol,
             interval: env::var("INTERVAL").unwrap_or_else(|_| "5m".to_string()),
             execution_mode,
             trade_amount_usdc,
@@ -274,6 +354,8 @@ impl Config {
             rsi_oversold,
             polymarket_slug_prefix: env::var("POLYMARKET_SLUG_PREFIX")
                 .unwrap_or_else(|_| "btc-updown-5m".to_string()),
+            polymarket_slug_format,
+            polymarket_slug_asset,
             martingale_multiplier,
             martingale_max_amount,
             trade_amount_pct,
@@ -283,6 +365,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(1),
+            limit_price_reference,
             limit_price_offset: env::var("LIMIT_PRICE_OFFSET")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())

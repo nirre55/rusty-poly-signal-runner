@@ -1,4 +1,6 @@
-use rusty_poly_streak_rsi::config::{ExecutionMode, MarketOrderType};
+use rusty_poly_streak_rsi::config::{
+    ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -46,6 +48,7 @@ fn clear_config_env() {
         "TRADE_AMOUNT_PCT",
         "EXCLUDED_DAYS",
         "EXCLUDED_HOURS",
+        "LIMIT_PRICE_REFERENCE",
         "LIMIT_PRICE_OFFSET",
         "MARKET_ORDER_TYPE",
         "SYMBOL",
@@ -53,6 +56,9 @@ fn clear_config_env() {
         "POLYMARKET_API_KEY",
         "POLYMARKET_API_SECRET",
         "POLYMARKET_API_URL",
+        "POLYMARKET_SLUG_FORMAT",
+        "POLYMARKET_SLUG_ASSET",
+        "POLYMARKET_SLUG_PREFIX",
         "POLYMARKET_PRIVATE_KEY",
         "POLYMARKET_FUNDER",
         "POLYMARKET_SIGNATURE_TYPE",
@@ -242,6 +248,76 @@ fn test_config_parses_limit_price_offset() {
     std::env::set_var("LIMIT_PRICE_OFFSET", "0.03");
     let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
     assert_eq!(config.limit_price_offset, 0.03);
+    clear_config_env();
+}
+
+#[test]
+fn test_config_parses_limit_price_reference_best_bid() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_REFERENCE", "best_bid");
+    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    assert_eq!(config.limit_price_reference, LimitPriceReference::BestBid);
+    clear_config_env();
+}
+
+#[test]
+fn test_config_rejects_unknown_limit_price_reference() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_REFERENCE", "mid");
+    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    assert!(err.to_string().contains("LIMIT_PRICE_REFERENCE"));
+    clear_config_env();
+}
+
+#[test]
+fn test_config_parses_hourly_et_slug_format() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("POLYMARKET_SLUG_FORMAT", "hourly_et");
+    std::env::set_var("POLYMARKET_SLUG_ASSET", "solana");
+    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    assert_eq!(
+        config.polymarket_slug_format,
+        PolymarketSlugFormat::HourlyEt
+    );
+    assert_eq!(config.polymarket_slug_asset, "solana");
+    clear_config_env();
+}
+
+#[test]
+fn test_config_defaults_hourly_asset_from_symbol() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("SYMBOL", "solusdt");
+    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    assert_eq!(config.polymarket_slug_asset, "solana");
+    clear_config_env();
+}
+
+#[test]
+fn test_config_rejects_unknown_slug_format() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("POLYMARKET_SLUG_FORMAT", "weekly");
+    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    assert!(err.to_string().contains("POLYMARKET_SLUG_FORMAT"));
     clear_config_env();
 }
 

@@ -89,12 +89,13 @@ pub fn spawn_prefetch_next_market(
     poly_client: &Arc<dyn PolymarketTradingClient>,
     close_time: DateTime<Utc>,
     interval_duration: Duration,
-    slug_prefix: &str,
+    config: &Config,
 ) {
     let poly = poly_client.clone();
+    let config = config.clone();
     let future_open_ms =
         (close_time + interval_duration + chrono::Duration::milliseconds(1)).timestamp_millis();
-    let future_slug = PolymarketClient::build_slug(slug_prefix, future_open_ms);
+    let future_slug = PolymarketClient::build_configured_slug(&config, future_open_ms);
     tokio::spawn(async move {
         if let Ok(market) = poly.resolve_market(&future_slug).await {
             let _ = poly.warm_sdk_caches(&market).await;
@@ -104,9 +105,9 @@ pub fn spawn_prefetch_next_market(
 
 async fn validate_and_prefetch_next_market(
     state: &RuntimeState,
+    config: &Config,
     candle: &Candle,
     interval_duration: Duration,
-    slug_prefix: &str,
 ) {
     state
         .tracker
@@ -116,7 +117,7 @@ async fn validate_and_prefetch_next_market(
         &state.poly_client,
         candle.close_time,
         interval_duration,
-        slug_prefix,
+        config,
     );
 }
 
@@ -185,16 +186,10 @@ pub async fn process_closed_candle(
     });
 
     let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1)).timestamp_millis();
-    let slug = PolymarketClient::build_slug(&config.polymarket_slug_prefix, next_open_ms);
+    let slug = PolymarketClient::build_configured_slug(config, next_open_ms);
 
     let Some(signal) = signal else {
-        validate_and_prefetch_next_market(
-            state,
-            candle,
-            interval_duration,
-            &config.polymarket_slug_prefix,
-        )
-        .await;
+        validate_and_prefetch_next_market(state, config, candle, interval_duration).await;
         return finish(state, ClosedCandleAction::NoSignal);
     };
 
@@ -220,13 +215,7 @@ pub async fn process_closed_candle(
                 );
             }
         }
-        validate_and_prefetch_next_market(
-            state,
-            candle,
-            interval_duration,
-            &config.polymarket_slug_prefix,
-        )
-        .await;
+        validate_and_prefetch_next_market(state, config, candle, interval_duration).await;
         return finish(state, ClosedCandleAction::Filtered);
     }
 
@@ -260,13 +249,7 @@ pub async fn process_closed_candle(
         Ok(r) => r,
         Err(e) => {
             error!("Erreur lors de l'envoi de l'ordre: {}", e);
-            validate_and_prefetch_next_market(
-                state,
-                candle,
-                interval_duration,
-                &config.polymarket_slug_prefix,
-            )
-            .await;
+            validate_and_prefetch_next_market(state, config, candle, interval_duration).await;
             return finish(state, ClosedCandleAction::OrderFailed);
         }
     };
@@ -321,13 +304,7 @@ pub async fn process_closed_candle(
         )
         .await;
 
-    validate_and_prefetch_next_market(
-        state,
-        candle,
-        interval_duration,
-        &config.polymarket_slug_prefix,
-    )
-    .await;
+    validate_and_prefetch_next_market(state, config, candle, interval_duration).await;
 
     finish(
         state,

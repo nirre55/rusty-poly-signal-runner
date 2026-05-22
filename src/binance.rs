@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+
+const BINANCE_WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const BINANCE_WS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 
 // Les champs high, low, volume seront utilisés par les stratégies futures (EMA, ATR, etc.)
 #[allow(dead_code)]
@@ -137,7 +140,7 @@ pub async fn stream_candles(
     loop {
         // P6 : timeout sur la tentative de connexion WebSocket
         let connect_result =
-            tokio::time::timeout(Duration::from_secs(15), connect_async(&ws_url)).await;
+            tokio::time::timeout(BINANCE_WS_CONNECT_TIMEOUT, connect_async(&ws_url)).await;
 
         match connect_result {
             Ok(Ok((ws_stream, _))) => {
@@ -160,9 +163,26 @@ pub async fn stream_candles(
                 }
 
                 reconnect_delay_secs = 5; // reset après connexion réussie
-                let (_, mut read) = ws_stream.split();
+                let (mut write, mut read) = ws_stream.split();
 
-                while let Some(msg) = read.next().await {
+                loop {
+                    let msg = match tokio::time::timeout(BINANCE_WS_INACTIVITY_TIMEOUT, read.next())
+                        .await
+                    {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => {
+                            warn!("WebSocket Binance ferme par le serveur, reconnexion...");
+                            break;
+                        }
+                        Err(_) => {
+                            warn!(
+                                "WebSocket Binance silencieux depuis {}s, reconnexion...",
+                                BINANCE_WS_INACTIVITY_TIMEOUT.as_secs()
+                            );
+                            break;
+                        }
+                    };
+
                     match msg {
                         Ok(Message::Text(text)) => {
                             match serde_json::from_str::<KlineEvent>(&text) {
@@ -270,7 +290,12 @@ pub async fn stream_candles(
                                 Err(e) => warn!("Impossible de parser le message kline: {}", e),
                             }
                         }
-                        Ok(Message::Ping(_)) => {}
+                        Ok(Message::Ping(payload)) => {
+                            if let Err(e) = write.send(Message::Pong(payload)).await {
+                                warn!("Impossible de repondre au ping Binance: {}", e);
+                                break;
+                            }
+                        }
                         Ok(Message::Close(_)) => {
                             warn!("WebSocket fermé, reconnexion…");
                             break;

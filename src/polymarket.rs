@@ -2,7 +2,8 @@ use alloy::primitives::{keccak256, Address, B256, U256};
 use alloy::signers::{local::PrivateKeySigner, Signer};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE, Engine};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono_tz::America::New_York;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
@@ -24,7 +25,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::config::{Config, ExecutionMode, MarketOrderType};
+use crate::config::{
+    Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+};
 use crate::strategy::{Prediction, Signal};
 
 // ── Constantes ───────────────────────────────────────────────────────────────
@@ -111,7 +114,10 @@ struct OrderBookLevel {
 
 #[derive(Deserialize)]
 struct OrderBook {
+    #[serde(default)]
     asks: Vec<OrderBookLevel>,
+    #[serde(default)]
+    bids: Vec<OrderBookLevel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,7 +200,30 @@ pub fn parse_best_ask_body(body: &str) -> Option<f64> {
         .min_by(f64::total_cmp)
 }
 
+pub fn parse_best_bid_body(body: &str) -> Option<f64> {
+    let book: OrderBook = serde_json::from_str(body).ok()?;
+    book.bids
+        .iter()
+        .filter_map(|level| level.price.parse::<f64>().ok())
+        .max_by(f64::total_cmp)
+}
+
+pub fn parse_book_reference_price_body(body: &str, reference: LimitPriceReference) -> Option<f64> {
+    match reference {
+        LimitPriceReference::BestAsk => parse_best_ask_body(body),
+        LimitPriceReference::BestBid => parse_best_bid_body(body),
+    }
+}
+
 pub fn parse_market_ws_best_ask_message(token_id: &str, body: &str) -> Option<f64> {
+    parse_market_ws_reference_price_message(token_id, body, LimitPriceReference::BestAsk)
+}
+
+pub fn parse_market_ws_reference_price_message(
+    token_id: &str,
+    body: &str,
+    reference: LimitPriceReference,
+) -> Option<f64> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let event_type = value.get("event_type")?.as_str()?;
 
@@ -202,7 +231,11 @@ pub fn parse_market_ws_best_ask_message(token_id: &str, body: &str) -> Option<f6
         "best_bid_ask" => {
             let asset_id = value.get("asset_id")?.as_str()?;
             if asset_id == token_id {
-                value.get("best_ask")?.as_str()?.parse::<f64>().ok()
+                let field = match reference {
+                    LimitPriceReference::BestAsk => "best_ask",
+                    LimitPriceReference::BestBid => "best_bid",
+                };
+                value.get(field)?.as_str()?.parse::<f64>().ok()
             } else {
                 None
             }
@@ -210,23 +243,41 @@ pub fn parse_market_ws_best_ask_message(token_id: &str, body: &str) -> Option<f6
         "book" => {
             let asset_id = value.get("asset_id")?.as_str()?;
             if asset_id == token_id {
-                value
-                    .get("asks")?
+                let side = match reference {
+                    LimitPriceReference::BestAsk => "asks",
+                    LimitPriceReference::BestBid => "bids",
+                };
+                let prices = value
+                    .get(side)?
                     .as_array()?
                     .iter()
-                    .filter_map(|level| level.get("price")?.as_str()?.parse::<f64>().ok())
-                    .min_by(f64::total_cmp)
+                    .filter_map(|level| level.get("price")?.as_str()?.parse::<f64>().ok());
+                match reference {
+                    LimitPriceReference::BestAsk => prices.min_by(f64::total_cmp),
+                    LimitPriceReference::BestBid => prices.max_by(f64::total_cmp),
+                }
             } else {
                 None
             }
         }
-        "price_change" => value
-            .get("price_changes")?
-            .as_array()?
-            .iter()
-            .filter(|change| change.get("asset_id").and_then(|id| id.as_str()) == Some(token_id))
-            .filter_map(|change| change.get("best_ask")?.as_str()?.parse::<f64>().ok())
-            .min_by(f64::total_cmp),
+        "price_change" => {
+            let field = match reference {
+                LimitPriceReference::BestAsk => "best_ask",
+                LimitPriceReference::BestBid => "best_bid",
+            };
+            let prices = value
+                .get("price_changes")?
+                .as_array()?
+                .iter()
+                .filter(|change| {
+                    change.get("asset_id").and_then(|id| id.as_str()) == Some(token_id)
+                })
+                .filter_map(|change| change.get(field)?.as_str()?.parse::<f64>().ok());
+            match reference {
+                LimitPriceReference::BestAsk => prices.min_by(f64::total_cmp),
+                LimitPriceReference::BestBid => prices.max_by(f64::total_cmp),
+            }
+        }
         _ => None,
     }
 }
@@ -234,11 +285,11 @@ pub fn parse_market_ws_best_ask_message(token_id: &str, body: &str) -> Option<f6
 pub fn calculate_limit_order_quote(
     amount_usdc: f64,
     min_size: f64,
-    best_ask: Option<f64>,
+    reference_price: Option<f64>,
     limit_price_offset: f64,
 ) -> LimitOrderQuote {
-    let base_price = best_ask.unwrap_or(0.50);
-    let limit_price = (base_price + limit_price_offset).min(0.99);
+    let base_price = reference_price.unwrap_or(0.50);
+    let limit_price = (base_price + limit_price_offset).clamp(0.01, 0.99);
     let expected_shares = amount_usdc / limit_price;
 
     if expected_shares < min_size {
@@ -482,6 +533,54 @@ impl PolymarketClient {
 
     /// Résout slug → condition_id + tokenIds UP/DOWN via l'API Gamma Polymarket.
     /// Résultat mis en cache : un seul appel réseau par slug distinct.
+    pub fn build_configured_slug(config: &Config, open_time_ms: i64) -> String {
+        match config.polymarket_slug_format {
+            PolymarketSlugFormat::Timestamp => {
+                Self::build_slug(&config.polymarket_slug_prefix, open_time_ms)
+            }
+            PolymarketSlugFormat::HourlyEt => {
+                Self::build_hourly_et_slug(&config.polymarket_slug_asset, open_time_ms)
+                    .unwrap_or_else(|| {
+                        Self::build_slug(&config.polymarket_slug_prefix, open_time_ms)
+                    })
+            }
+        }
+    }
+
+    pub fn build_hourly_et_slug(asset: &str, open_time_ms: i64) -> Option<String> {
+        let utc = DateTime::<Utc>::from_timestamp_millis(open_time_ms)?;
+        let et = utc.with_timezone(&New_York);
+        let month = match et.month() {
+            1 => "january",
+            2 => "february",
+            3 => "march",
+            4 => "april",
+            5 => "may",
+            6 => "june",
+            7 => "july",
+            8 => "august",
+            9 => "september",
+            10 => "october",
+            11 => "november",
+            12 => "december",
+            _ => return None,
+        };
+        let hour_12 = match et.hour() % 12 {
+            0 => 12,
+            h => h,
+        };
+        let am_pm = if et.hour() < 12 { "am" } else { "pm" };
+        Some(format!(
+            "{}-up-or-down-{}-{}-{}-{}{}-et",
+            asset.trim().to_ascii_lowercase().replace(' ', "-"),
+            month,
+            et.day(),
+            et.year(),
+            hour_12,
+            am_pm
+        ))
+    }
+
     pub async fn resolve_market(&self, slug: &str) -> Result<MarketInfo> {
         use std::time::Instant;
 
@@ -660,32 +759,53 @@ impl PolymarketClient {
 
     // ── Order book ────────────────────────────────────────────────────────────
 
-    /// Retourne le meilleur ask (prix le plus bas côté vendeurs) depuis le CLOB public.
+    /// Retourne le prix de reference limite depuis le CLOB public.
     /// Retourne None si le book est vide ou si l'appel échoue.
-    async fn get_best_ask(&self, token_id_str: &str) -> Option<f64> {
+    async fn get_limit_reference_price(&self, token_id_str: &str) -> Option<f64> {
         let url = format!("{}/book?token_id={}", self.clob_api_base, token_id_str);
         if let Ok(resp) = self.http.get(&url).send().await {
             if resp.status().is_success() {
                 if let Ok(body) = resp.text().await {
-                    if let Some(best_ask) = parse_best_ask_body(&body) {
-                        return Some(best_ask);
+                    if let Some(reference_price) =
+                        parse_book_reference_price_body(&body, self.config.limit_price_reference)
+                    {
+                        return Some(reference_price);
                     }
                 }
             }
         }
 
         warn!(
-            "[LIMIT] /book indisponible ou vide pour token={} - tentative WebSocket snapshot",
-            token_id_str
+            "[LIMIT] /book indisponible ou vide pour token={} reference={} - tentative WebSocket snapshot",
+            token_id_str,
+            self.config.limit_price_reference.as_str()
         );
-        self.get_best_ask_ws_snapshot(token_id_str, Duration::from_millis(1500))
-            .await
+        self.get_reference_price_ws_snapshot(
+            token_id_str,
+            Duration::from_millis(1500),
+            self.config.limit_price_reference,
+        )
+        .await
     }
 
     pub async fn get_best_ask_ws_snapshot(
         &self,
         token_id_str: &str,
         timeout_duration: Duration,
+    ) -> Option<f64> {
+        self.get_reference_price_ws_snapshot(
+            token_id_str,
+            timeout_duration,
+            LimitPriceReference::BestAsk,
+        )
+        .await
+    }
+
+    pub async fn get_reference_price_ws_snapshot(
+        &self,
+        token_id_str: &str,
+        timeout_duration: Duration,
+        reference: LimitPriceReference,
     ) -> Option<f64> {
         let subscription = serde_json::json!({
             "assets_ids": [token_id_str],
@@ -700,18 +820,18 @@ impl PolymarketClient {
             while let Some(message) = ws.next().await {
                 match message.ok()? {
                     Message::Text(text) => {
-                        if let Some(best_ask) =
-                            parse_market_ws_best_ask_message(token_id_str, &text)
+                        if let Some(reference_price) =
+                            parse_market_ws_reference_price_message(token_id_str, &text, reference)
                         {
-                            return Some(best_ask);
+                            return Some(reference_price);
                         }
                     }
                     Message::Binary(bytes) => {
                         let text = String::from_utf8(bytes).ok()?;
-                        if let Some(best_ask) =
-                            parse_market_ws_best_ask_message(token_id_str, &text)
+                        if let Some(reference_price) =
+                            parse_market_ws_reference_price_message(token_id_str, &text, reference)
                         {
-                            return Some(best_ask);
+                            return Some(reference_price);
                         }
                     }
                     Message::Ping(payload) => {
@@ -740,8 +860,7 @@ impl PolymarketClient {
         calculate_available_shares_up_to_price(&body, limit_price)
     }
 
-    /// Ordre limite GTC au prix `best_ask + LIMIT_PRICE_OFFSET`.
-    /// Garantit le fill quasi-systématique en étant agressif sur le prix.
+    /// Ordre limite GTC au prix `LIMIT_PRICE_REFERENCE + LIMIT_PRICE_OFFSET`.
     async fn submit_limit_order(
         &self,
         token_id_str: &str,
@@ -757,28 +876,34 @@ impl PolymarketClient {
             .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Limit"))?;
 
         let t_book = Instant::now();
-        let best_ask = self.get_best_ask(token_id_str).await;
+        let reference = self.config.limit_price_reference;
+        let reference_price = self.get_limit_reference_price(token_id_str).await;
         let book_ms = t_book.elapsed().as_millis();
         let quote = calculate_limit_order_quote(
             amount_usdc,
             min_size,
-            best_ask,
+            reference_price,
             self.config.limit_price_offset,
         );
 
-        let limit_price = match best_ask {
-            Some(ask) => {
+        let limit_price = match reference_price {
+            Some(price) => {
                 let p = quote.limit_price;
                 info!(
-                    "[LIMIT] best_ask={:.4} offset={:.4} → limit_price={:.4} (book={}ms)",
-                    ask, self.config.limit_price_offset, p, book_ms
+                    "[LIMIT] reference={} price={:.4} offset={:.4} -> limit_price={:.4} (book={}ms)",
+                    reference.as_str(),
+                    price,
+                    self.config.limit_price_offset,
+                    p,
+                    book_ms
                 );
                 p
             }
             None => {
                 let fallback = quote.limit_price;
                 warn!(
-                    "[LIMIT] Order book vide ou inaccessible — fallback price={:.4}",
+                    "[LIMIT] reference={} indisponible - fallback price={:.4}",
+                    reference.as_str(),
                     fallback
                 );
                 fallback

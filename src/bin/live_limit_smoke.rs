@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
 
     let interval_ms = interval_ms(&config.interval)?;
     let next_open_ms = (Utc::now().timestamp_millis() / interval_ms + 1) * interval_ms;
-    let slug = PolymarketClient::build_slug(&config.polymarket_slug_prefix, next_open_ms);
+    let slug = PolymarketClient::build_configured_slug(&config, next_open_ms);
     let client = PolymarketClient::new(config.clone());
     let market = client.resolve_market(&slug).await?;
 
@@ -137,9 +137,12 @@ fn is_filled_status(status: &str) -> bool {
 }
 
 fn interval_ms(interval: &str) -> Result<i64> {
-    let value = interval
-        .strip_suffix('m')
-        .ok_or_else(|| anyhow!("interval non supporte pour ce test: {}", interval))?
-        .parse::<i64>()?;
-    Ok(value * 60 * 1000)
+    let (value, multiplier) = if let Some(value) = interval.strip_suffix('m') {
+        (value, 60 * 1000)
+    } else if let Some(value) = interval.strip_suffix('h') {
+        (value, 60 * 60 * 1000)
+    } else {
+        anyhow::bail!("interval non supporte pour ce test: {}", interval);
+    };
+    Ok(value.parse::<i64>()? * multiplier)
 }
