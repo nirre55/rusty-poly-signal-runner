@@ -16,6 +16,8 @@ CONFIGS=(
 SUPERVISOR_DIR="$ROOT/logs/supervisor"
 RESTART_DELAY_SECONDS="${RESTART_DELAY_SECONDS:-15}"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
+RUST_LOG="${RUST_LOG:-error}"
+SUPERVISOR_VERBOSE="${SUPERVISOR_VERBOSE:-0}"
 
 mkdir -p "$SUPERVISOR_DIR"
 
@@ -29,6 +31,8 @@ Usage:
 
 Environment:
   CARGO_PROFILE=release|debug      Default: release
+  RUST_LOG=error|warn|info         Default: error
+  SUPERVISOR_VERBOSE=1             Log supervisor lifecycle messages
   RESTART_DELAY_SECONDS=15         Delay before auto-restart
   NO_RESTART=1                     Disable auto-restart
 EOF
@@ -68,19 +72,27 @@ supervise() {
   local binary="$3"
 
   export STRATEGY_CONFIG="$cfg"
-  echo "[$(date -Is)] [$name] supervisor started | config=$cfg | binary=$binary | restart=${NO_RESTART:-0}"
+  export RUST_LOG
+
+  log_supervisor() {
+    if [[ "${SUPERVISOR_VERBOSE:-0}" == "1" ]]; then
+      echo "[$(date -Is)] [$name] $*"
+    fi
+  }
+
+  log_supervisor "supervisor started | config=$cfg | binary=$binary | rust_log=$RUST_LOG | restart=${NO_RESTART:-0}"
 
   while true; do
-    echo "[$(date -Is)] [$name] process starting"
+    log_supervisor "process starting"
     "$binary"
     exit_code=$?
-    echo "[$(date -Is)] [$name] process exited code=$exit_code"
+    log_supervisor "process exited code=$exit_code"
 
     if [[ "${NO_RESTART:-0}" == "1" ]]; then
       break
     fi
 
-    echo "[$(date -Is)] [$name] restart in ${RESTART_DELAY_SECONDS}s"
+    log_supervisor "restart in ${RESTART_DELAY_SECONDS}s"
     sleep "$RESTART_DELAY_SECONDS"
   done
 }
@@ -179,7 +191,7 @@ build_once() {
 }
 
 export -f supervise cargo_args binary_path
-export ROOT STRATEGY_CONFIG RESTART_DELAY_SECONDS CARGO_PROFILE NO_RESTART
+export ROOT STRATEGY_CONFIG RESTART_DELAY_SECONDS CARGO_PROFILE RUST_LOG SUPERVISOR_VERBOSE NO_RESTART
 
 command="${1:-start}"
 case "$command" in
