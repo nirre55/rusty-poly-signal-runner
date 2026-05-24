@@ -2,9 +2,11 @@ use anyhow::Result;
 
 use crate::config::Config;
 use crate::strategies::btc_15m_rules_18_min_votes_1::BtcRules18;
+use crate::strategies::btc_1h_rules_15_min_votes_1::BtcH1Rules15;
 use crate::strategies::btc_5m_rules_23_min_votes_1::BtcRules23;
 use crate::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
 use crate::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
+use crate::strategies::eth_1h_rules_17_min_votes_1::EthH1Rules17;
 use crate::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
 use crate::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
 use crate::strategy::Strategy;
@@ -20,10 +22,16 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
             config.ensemble_min_votes,
         ))),
         "btc_15m_rules_18_min_votes_1" => Ok(Box::new(BtcRules18::new(config.ensemble_min_votes))),
+        "btc_1h_rules_15_min_votes_1" => {
+            Ok(Box::new(BtcH1Rules15::new(config.ensemble_min_votes)))
+        },
         "eth_5m_rules_25_min_votes_1" => Ok(Box::new(EthRules25::new(config.ensemble_min_votes))),
         "eth_15m_rules_24_min_votes_1" => {
             Ok(Box::new(EthRules24::new(config.ensemble_min_votes)))
         }
+        "eth_1h_rules_17_min_votes_1" => {
+            Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes)))
+        },
         other => anyhow::bail!(
             "Stratégie '{}' inconnue. Stratégies disponibles: three_candle_rsi7_reversal, btc_5m_rules_90_min_votes_1, btc_5m_rules_23_min_votes_1, btc_15m_rules_18_min_votes_1, eth_5m_rules_25_min_votes_1, eth_15m_rules_24_min_votes_1",
             other
@@ -35,7 +43,8 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
 mod tests {
     use super::create_strategy;
     use crate::config::{
-        Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+        Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
+        PolymarketSlugFormat,
     };
 
     fn config_with_strategy(strategy: &str) -> Config {
@@ -66,6 +75,11 @@ mod tests {
             ensemble_min_votes: 1,
             limit_price_reference: LimitPriceReference::BestAsk,
             limit_price_offset: 0.01,
+            limit_price_high_guard: LimitPriceHighGuard {
+                enabled: false,
+                threshold: 0.60,
+                price: 0.55,
+            },
             market_order_type: MarketOrderType::Fok,
         }
     }
@@ -77,8 +91,10 @@ mod tests {
             "btc_5m_rules_90_min_votes_1",
             "btc_5m_rules_23_min_votes_1",
             "btc_15m_rules_18_min_votes_1",
+            "btc_1h_rules_15_min_votes_1",
             "eth_5m_rules_25_min_votes_1",
             "eth_15m_rules_24_min_votes_1",
+            "eth_1h_rules_17_min_votes_1",
         ] {
             let strategy = create_strategy(&config_with_strategy(strategy_name))
                 .expect("strategy should be created");

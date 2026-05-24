@@ -64,6 +64,13 @@ impl PolymarketSlugFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LimitPriceHighGuard {
+    pub enabled: bool,
+    pub threshold: f64,
+    pub price: f64,
+}
+
 // P13 : impl Debug manuel pour masquer les secrets dans les logs
 #[derive(Clone)]
 pub struct Config {
@@ -114,6 +121,8 @@ pub struct Config {
     pub limit_price_reference: LimitPriceReference,
     /// Offset signe ajoute au prix de reference (ex: 0.01, 0, -0.01). Defaut: 0.01
     pub limit_price_offset: f64,
+    /// Garde-fou optionnel: si le prix limite depasse threshold, force price.
+    pub limit_price_high_guard: LimitPriceHighGuard,
     pub market_order_type: MarketOrderType,
 }
 
@@ -146,6 +155,7 @@ impl std::fmt::Debug for Config {
             .field("ensemble_min_votes", &self.ensemble_min_votes)
             .field("limit_price_reference", &self.limit_price_reference)
             .field("limit_price_offset", &self.limit_price_offset)
+            .field("limit_price_high_guard", &self.limit_price_high_guard)
             .field("market_order_type", &self.market_order_type)
             .finish()
     }
@@ -159,6 +169,18 @@ fn default_slug_asset(symbol: &str) -> String {
         "solusdt" | "sol" => "solana".to_string(),
         other => other.strip_suffix("usdt").unwrap_or(other).to_string(),
     }
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(default)
 }
 
 impl Config {
@@ -303,6 +325,18 @@ impl Config {
         let polymarket_slug_asset =
             env::var("POLYMARKET_SLUG_ASSET").unwrap_or_else(|_| default_slug_asset(&symbol));
 
+        let limit_price_high_guard = LimitPriceHighGuard {
+            enabled: parse_bool_env("LIMIT_PRICE_HIGH_GUARD_ENABLED", false),
+            threshold: env::var("LIMIT_PRICE_HIGH_GUARD_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.60),
+            price: env::var("LIMIT_PRICE_HIGH_GUARD_PRICE")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.55),
+        };
+
         let excluded_days = env::var("EXCLUDED_DAYS")
             .unwrap_or_default()
             .split(',')
@@ -370,6 +404,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.01),
+            limit_price_high_guard,
             market_order_type,
         };
         config.validate_for_startup()?;
@@ -377,6 +412,29 @@ impl Config {
     }
 
     pub fn validate_for_startup(&self) -> Result<()> {
+        if self.limit_price_high_guard.enabled {
+            let guard = self.limit_price_high_guard;
+            if !(0.01..=0.99).contains(&guard.threshold) {
+                anyhow::bail!(
+                    "LIMIT_PRICE_HIGH_GUARD_THRESHOLD={} invalide - doit etre entre 0.01 et 0.99",
+                    guard.threshold
+                );
+            }
+            if !(0.01..=0.99).contains(&guard.price) {
+                anyhow::bail!(
+                    "LIMIT_PRICE_HIGH_GUARD_PRICE={} invalide - doit etre entre 0.01 et 0.99",
+                    guard.price
+                );
+            }
+            if guard.price >= guard.threshold {
+                anyhow::bail!(
+                    "LIMIT_PRICE_HIGH_GUARD_PRICE={} doit etre inferieur au seuil {}",
+                    guard.price,
+                    guard.threshold
+                );
+            }
+        }
+
         if matches!(self.execution_mode, ExecutionMode::DryRun) {
             return Ok(());
         }

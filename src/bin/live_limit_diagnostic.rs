@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusty_poly_streak_rsi::config::{Config, LimitPriceReference};
+use rusty_poly_streak_rsi::config::{Config, LimitPriceHighGuard, LimitPriceReference};
 use rusty_poly_streak_rsi::polymarket::{
     calculate_available_shares_up_to_price, calculate_limit_order_quote,
     parse_book_reference_price_body, validate_sufficient_usdc_balance, PolymarketClient,
@@ -16,6 +16,7 @@ struct TokenQuote<'a> {
     expected_shares: f64,
     effective_usdc: f64,
     adjusted_to_min_size: bool,
+    high_guard_applied: bool,
     available_shares_at_limit: Option<f64>,
 }
 
@@ -26,6 +27,7 @@ struct QuoteRequest<'a> {
     min_size: f64,
     limit_price_reference: LimitPriceReference,
     limit_price_offset: f64,
+    limit_price_high_guard: LimitPriceHighGuard,
 }
 
 #[tokio::main]
@@ -64,12 +66,15 @@ async fn main() -> Result<()> {
     };
 
     println!(
-        "balance={:.2} USDC requested={:.2} USDC min_size={:.2} shares reference={} offset={:.4}",
+        "balance={:.2} USDC requested={:.2} USDC min_size={:.2} shares reference={} offset={:.4} high_guard={} threshold={:.4} price={:.4}",
         balance,
         requested_usdc,
         market.order_min_size,
         config.limit_price_reference.as_str(),
-        config.limit_price_offset
+        config.limit_price_offset,
+        config.limit_price_high_guard.enabled,
+        config.limit_price_high_guard.threshold,
+        config.limit_price_high_guard.price
     );
 
     let up = quote_token(
@@ -83,6 +88,7 @@ async fn main() -> Result<()> {
             min_size: market.order_min_size,
             limit_price_reference: config.limit_price_reference,
             limit_price_offset: config.limit_price_offset,
+            limit_price_high_guard: config.limit_price_high_guard,
         },
     )
     .await?;
@@ -97,6 +103,7 @@ async fn main() -> Result<()> {
             min_size: market.order_min_size,
             limit_price_reference: config.limit_price_reference,
             limit_price_offset: config.limit_price_offset,
+            limit_price_high_guard: config.limit_price_high_guard,
         },
     )
     .await?;
@@ -134,6 +141,7 @@ async fn quote_token<'a>(
         request.min_size,
         reference_price,
         request.limit_price_offset,
+        request.limit_price_high_guard,
     );
     let available_shares_at_limit =
         calculate_available_shares_up_to_price(&body, quote.limit_price);
@@ -147,6 +155,7 @@ async fn quote_token<'a>(
         expected_shares: quote.expected_shares,
         effective_usdc: quote.effective_usdc,
         adjusted_to_min_size: quote.adjusted_to_min_size,
+        high_guard_applied: quote.high_guard_applied,
         available_shares_at_limit,
     })
 }
@@ -158,7 +167,7 @@ fn print_quote(quote: &TokenQuote<'_>, balance: f64) {
     };
 
     println!(
-        "{} token={} rest_reference_price={} ws_reference_price={} limit_price={:.4} expected_shares={:.2} available_shares_at_limit={} effective_usdc={:.2} adjusted_to_min_size={} balance_status={}",
+        "{} token={} rest_reference_price={} ws_reference_price={} limit_price={:.4} expected_shares={:.2} available_shares_at_limit={} effective_usdc={:.2} adjusted_to_min_size={} high_guard_applied={} balance_status={}",
         quote.side,
         quote.token_id,
         quote
@@ -177,6 +186,7 @@ fn print_quote(quote: &TokenQuote<'_>, balance: f64) {
             .unwrap_or_else(|| "UNKNOWN".to_string()),
         quote.effective_usdc,
         quote.adjusted_to_min_size,
+        quote.high_guard_applied,
         balance_status
     );
 }

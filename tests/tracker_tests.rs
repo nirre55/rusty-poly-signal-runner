@@ -1,7 +1,8 @@
 use chrono::{Duration, Utc};
 use rusty_poly_streak_rsi::binance::Candle;
 use rusty_poly_streak_rsi::config::{
-    Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+    Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
+    PolymarketSlugFormat,
 };
 use rusty_poly_streak_rsi::logger::{TradeLogger, TradeRecord};
 use rusty_poly_streak_rsi::money::MoneyManager;
@@ -51,6 +52,11 @@ fn make_config(logs_dir: &str) -> Config {
         ensemble_min_votes: 1,
         limit_price_reference: LimitPriceReference::BestAsk,
         limit_price_offset: 0.01,
+        limit_price_high_guard: LimitPriceHighGuard {
+            enabled: false,
+            threshold: 0.60,
+            price: 0.55,
+        },
         market_order_type: MarketOrderType::Fok,
     }
 }

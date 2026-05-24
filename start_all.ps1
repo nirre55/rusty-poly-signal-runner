@@ -3,7 +3,9 @@ param(
         "configs/btc_combined.env",
         "configs/eth_ensemble.env",
         "configs/btc_15m_ensemble.env",
-        "configs/eth_15m_ensemble.env"
+        "configs/eth_15m_ensemble.env",
+        "configs/btc_1h_ensemble.env",
+        "configs/eth_1h_ensemble.env"
     ),
     [switch]$DebugBuild,
     [switch]$NoRestart,

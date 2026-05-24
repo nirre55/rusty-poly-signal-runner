@@ -50,6 +50,9 @@ fn clear_config_env() {
         "EXCLUDED_HOURS",
         "LIMIT_PRICE_REFERENCE",
         "LIMIT_PRICE_OFFSET",
+        "LIMIT_PRICE_HIGH_GUARD_ENABLED",
+        "LIMIT_PRICE_HIGH_GUARD_THRESHOLD",
+        "LIMIT_PRICE_HIGH_GUARD_PRICE",
         "MARKET_ORDER_TYPE",
         "SYMBOL",
         "INTERVAL",
@@ -274,6 +277,38 @@ fn test_config_rejects_unknown_limit_price_reference() {
     std::env::set_var("LIMIT_PRICE_REFERENCE", "mid");
     let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
     assert!(err.to_string().contains("LIMIT_PRICE_REFERENCE"));
+    clear_config_env();
+}
+
+#[test]
+fn test_config_parses_limit_price_high_guard() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_ENABLED", "true");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_THRESHOLD", "0.61");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_PRICE", "0.54");
+    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    assert!(config.limit_price_high_guard.enabled);
+    assert_eq!(config.limit_price_high_guard.threshold, 0.61);
+    assert_eq!(config.limit_price_high_guard.price, 0.54);
+    clear_config_env();
+}
+
+#[test]
+fn test_config_rejects_invalid_limit_price_high_guard() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_ENABLED", "true");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_THRESHOLD", "0.60");
+    std::env::set_var("LIMIT_PRICE_HIGH_GUARD_PRICE", "0.60");
+    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    assert!(err.to_string().contains("LIMIT_PRICE_HIGH_GUARD_PRICE"));
     clear_config_env();
 }
 

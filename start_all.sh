@@ -9,6 +9,8 @@ CONFIGS=(
   "configs/eth_ensemble.env"
   "configs/btc_15m_ensemble.env"
   "configs/eth_15m_ensemble.env"
+  "configs/btc_1h_ensemble.env"
+  "configs/eth_1h_ensemble.env"
 )
 
 SUPERVISOR_DIR="$ROOT/logs/supervisor"

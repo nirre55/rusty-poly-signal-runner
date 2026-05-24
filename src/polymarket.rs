@@ -26,7 +26,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::{
-    Config, ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
+    Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
+    PolymarketSlugFormat,
 };
 use crate::strategy::{Prediction, Signal};
 
@@ -126,6 +127,8 @@ pub struct LimitOrderQuote {
     pub expected_shares: f64,
     pub effective_usdc: f64,
     pub adjusted_to_min_size: bool,
+    pub high_guard_applied: bool,
+    pub uncapped_limit_price: f64,
 }
 
 #[derive(Deserialize)]
@@ -287,9 +290,16 @@ pub fn calculate_limit_order_quote(
     min_size: f64,
     reference_price: Option<f64>,
     limit_price_offset: f64,
+    high_guard: LimitPriceHighGuard,
 ) -> LimitOrderQuote {
     let base_price = reference_price.unwrap_or(0.50);
-    let limit_price = (base_price + limit_price_offset).clamp(0.01, 0.99);
+    let uncapped_limit_price = (base_price + limit_price_offset).clamp(0.01, 0.99);
+    let high_guard_applied = high_guard.enabled && uncapped_limit_price > high_guard.threshold;
+    let limit_price = if high_guard_applied {
+        high_guard.price.clamp(0.01, 0.99)
+    } else {
+        uncapped_limit_price
+    };
     let expected_shares = amount_usdc / limit_price;
 
     if expected_shares < min_size {
@@ -299,6 +309,8 @@ pub fn calculate_limit_order_quote(
             expected_shares,
             effective_usdc,
             adjusted_to_min_size: true,
+            high_guard_applied,
+            uncapped_limit_price,
         }
     } else {
         LimitOrderQuote {
@@ -306,6 +318,8 @@ pub fn calculate_limit_order_quote(
             expected_shares,
             effective_usdc: amount_usdc,
             adjusted_to_min_size: false,
+            high_guard_applied,
+            uncapped_limit_price,
         }
     }
 }
@@ -884,6 +898,7 @@ impl PolymarketClient {
             min_size,
             reference_price,
             self.config.limit_price_offset,
+            self.config.limit_price_high_guard,
         );
 
         let limit_price = match reference_price {
@@ -912,6 +927,15 @@ impl PolymarketClient {
 
         // Vérifier que le montant couvre le minimum de shares (par défaut 5 sur Polymarket).
         // shares = USDC / prix → si insuffisant, on monte au minimum requis.
+        if quote.high_guard_applied {
+            warn!(
+                "[LIMIT] high guard applique | calculated_price={:.4} threshold={:.4} forced_price={:.4}",
+                quote.uncapped_limit_price,
+                self.config.limit_price_high_guard.threshold,
+                quote.limit_price
+            );
+        }
+
         let expected_shares = quote.expected_shares;
         let effective_usdc = if quote.adjusted_to_min_size {
             let min_usdc = quote.effective_usdc;

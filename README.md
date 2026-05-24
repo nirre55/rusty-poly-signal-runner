@@ -25,8 +25,10 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 | `btc_5m_rules_90_min_votes_1` | BTC 5m | Ensemble de 90 micro-règles. |
 | `btc_5m_rules_23_min_votes_1` | BTC 5m | Ensemble combine de 23 micro-strategies, `min_votes=1`. |
 | `btc_15m_rules_18_min_votes_1` | BTC 15m | Ensemble de 18 micro-règles. |
+| `btc_1h_rules_15_min_votes_1` | BTC 1h | Ensemble de 15 micro-règles H1. |
 | `eth_5m_rules_25_min_votes_1` | ETH 5m | Ensemble de 25 micro-règles. |
 | `eth_15m_rules_24_min_votes_1` | ETH 15m | Ensemble de 24 micro-règles. |
+| `eth_1h_rules_17_min_votes_1` | ETH 1h | Ensemble de 17 micro-règles H1. |
 
 La stratégie active se choisit avec `STRATEGY` ou via `STRATEGY_CONFIG`.
 
@@ -63,6 +65,9 @@ Variables principales :
 | `ENSEMBLE_MIN_VOTES` | Nombre minimal de votes pour les stratégies ensemble. | `1` |
 | `LIMIT_PRICE_REFERENCE` | Prix de reference des ordres limite: `best_ask` ou `best_bid`. | `best_ask` |
 | `LIMIT_PRICE_OFFSET` | Offset signe ajoute au prix de reference en mode `limit`, ex. `0.01`, `0`, `-0.01`. | `0.01` |
+| `LIMIT_PRICE_HIGH_GUARD_ENABLED` | Active le garde-fou des prix limite eleves. Si actif et que le prix calcule depasse le seuil, le bot force le prix configure. | `false` |
+| `LIMIT_PRICE_HIGH_GUARD_THRESHOLD` | Seuil du garde-fou, ex. `0.60`. Le garde-fou s'applique seulement si le prix calcule est strictement superieur au seuil. | `0.60` |
+| `LIMIT_PRICE_HIGH_GUARD_PRICE` | Prix limite force par le garde-fou, ex. `0.55`. Doit etre inferieur au seuil. | `0.55` |
 | `MARTINGALE_MULTIPLIER` | Multiplicateur après une perte. `1.0` désactive la martingale. | `1.0` |
 | `MARTINGALE_MAX_AMOUNT` | Plafond martingale. `0.0` désactive le plafond. | `0.0` |
 | `EXCLUDED_DAYS` | Jours exclus, ex. `sat,sun`. | Vide |
