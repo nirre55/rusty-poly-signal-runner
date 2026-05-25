@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use csv::{StringRecord, WriterBuilder};
 use reqwest::Client;
-use rusty_poly_streak_rsi::config::Config;
+use rusty_poly_signal_runner::config::Config;
 use serde::Deserialize;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};

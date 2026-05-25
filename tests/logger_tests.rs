@@ -1,6 +1,6 @@
 use chrono::{Duration, TimeZone, Utc};
-use rusty_poly_streak_rsi::logger::{PendingBuyTradeRecord, TradeLogger, TradeRecord};
-use rusty_poly_streak_rsi::trade_timing::TradeLatencies;
+use rusty_poly_signal_runner::logger::{PendingBuyTradeRecord, TradeLogger, TradeRecord};
+use rusty_poly_signal_runner::trade_timing::TradeLatencies;
 use std::fs;
 
 fn make_record(trade_id: &str, prediction: &str) -> TradeRecord {
@@ -26,7 +26,7 @@ fn make_record(trade_id: &str, prediction: &str) -> TradeRecord {
 fn tmp_dir(label: &str) -> std::path::PathBuf {
     // Dossier unique par test pour éviter les conflits entre tests parallèles
     let dir = std::env::temp_dir().join(format!(
-        "rusty_poly_streak_rsi_test_{}_{}",
+        "rusty_poly_signal_runner_test_{}_{}",
         label,
         uuid::Uuid::new_v4()
     ));

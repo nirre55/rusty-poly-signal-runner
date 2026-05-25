@@ -21,9 +21,9 @@ New-Item -ItemType Directory -Force -Path $supervisorDir | Out-Null
 
 $buildArgs = if ($DebugBuild) { @("build") } else { @("build", "--release") }
 $binaryRelative = if ($DebugBuild) {
-    "target/debug/rusty-poly-streak-rsi.exe"
+    "target/debug/rusty-poly-signal-runner.exe"
 } else {
-    "target/release/rusty-poly-streak-rsi.exe"
+    "target/release/rusty-poly-signal-runner.exe"
 }
 $binaryPath = Join-Path $root $binaryRelative
 $restartEnabled = -not $NoRestart

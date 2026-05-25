@@ -1,17 +1,17 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use rusty_poly_streak_rsi::binance::Candle;
-use rusty_poly_streak_rsi::config::{
+use rusty_poly_signal_runner::binance::Candle;
+use rusty_poly_signal_runner::config::{
     Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
     PolymarketSlugFormat,
 };
-use rusty_poly_streak_rsi::logger::TradeLogger;
-use rusty_poly_streak_rsi::money::MoneyManager;
-use rusty_poly_streak_rsi::polymarket::{MarketInfo, OrderResult};
-use rusty_poly_streak_rsi::runtime_metrics::RuntimeMetrics;
-use rusty_poly_streak_rsi::strategy::{Prediction, Signal, Strategy};
-use rusty_poly_streak_rsi::tracker::{PolymarketReadClient, PositionTracker};
-use rusty_poly_streak_rsi::trading_runtime::{
+use rusty_poly_signal_runner::logger::TradeLogger;
+use rusty_poly_signal_runner::money::MoneyManager;
+use rusty_poly_signal_runner::polymarket::{MarketInfo, OrderResult};
+use rusty_poly_signal_runner::runtime_metrics::RuntimeMetrics;
+use rusty_poly_signal_runner::strategy::{Prediction, Signal, Strategy};
+use rusty_poly_signal_runner::tracker::{PolymarketReadClient, PositionTracker};
+use rusty_poly_signal_runner::trading_runtime::{
     process_closed_candle, ClosedCandleAction, PolymarketTradingClient, RuntimeState,
 };
 use std::future::Future;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 fn tmp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "rusty_poly_streak_rsi_runtime_test_{}_{}",
+        "rusty_poly_signal_runner_runtime_test_{}_{}",
         label,
         uuid::Uuid::new_v4()
     ))

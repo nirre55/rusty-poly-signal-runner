@@ -1,4 +1,4 @@
-# rusty-poly-streak-rsi
+# rusty-poly-signal-runner
 
 Bot de trading live en Rust pour les marchés Polymarket Up/Down, alimenté par les bougies Binance.
 

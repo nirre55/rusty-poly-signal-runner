@@ -1,10 +1,10 @@
 use chrono::{TimeZone, Utc};
-use rusty_poly_streak_rsi::binance::Candle;
-use rusty_poly_streak_rsi::strategies::btc_15m_rules_18_min_votes_1::BtcRules18;
-use rusty_poly_streak_rsi::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
-use rusty_poly_streak_rsi::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
-use rusty_poly_streak_rsi::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
-use rusty_poly_streak_rsi::strategy::Strategy;
+use rusty_poly_signal_runner::binance::Candle;
+use rusty_poly_signal_runner::strategies::btc_15m_rules_18_min_votes_1::BtcRules18;
+use rusty_poly_signal_runner::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
+use rusty_poly_signal_runner::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
+use rusty_poly_signal_runner::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
+use rusty_poly_signal_runner::strategy::Strategy;
 
 fn flat_fixture(len: usize) -> Vec<Candle> {
     let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();

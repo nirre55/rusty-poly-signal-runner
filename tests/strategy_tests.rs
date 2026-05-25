@@ -1,7 +1,7 @@
 use chrono::Utc;
-use rusty_poly_streak_rsi::binance::Candle;
-use rusty_poly_streak_rsi::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
-use rusty_poly_streak_rsi::strategy::{Prediction, Strategy};
+use rusty_poly_signal_runner::binance::Candle;
+use rusty_poly_signal_runner::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
+use rusty_poly_signal_runner::strategy::{Prediction, Strategy};
 
 fn make_candle(open: f64, close: f64) -> Candle {
     // Mèche = 10% du body pour body_ratio ≈ 0.83 (> seuil 0.60)
@@ -21,7 +21,7 @@ fn make_candle(open: f64, close: f64) -> Candle {
 fn feed(
     strategy: &mut ThreeCandleRsi7Reversal,
     candles: &[(f64, f64)],
-) -> Option<rusty_poly_streak_rsi::strategy::Signal> {
+) -> Option<rusty_poly_signal_runner::strategy::Signal> {
     let mut last = None;
     for &(open, close) in candles {
         last = strategy.on_closed_candle(&make_candle(open, close));

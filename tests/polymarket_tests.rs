@@ -1,17 +1,17 @@
 use chrono::TimeZone;
 use chrono::Utc;
-use rusty_poly_streak_rsi::config::{
+use rusty_poly_signal_runner::config::{
     Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
     PolymarketSlugFormat,
 };
-use rusty_poly_streak_rsi::polymarket::{
+use rusty_poly_signal_runner::polymarket::{
     calculate_available_shares_up_to_price, calculate_limit_order_quote, parse_best_ask_body,
     parse_best_bid_body, parse_book_reference_price_body, parse_gamma_market_body,
     parse_market_ws_best_ask_message, parse_market_ws_reference_price_message,
     parse_order_execution_details_body, parse_order_status_body, validate_sufficient_usdc_balance,
     MarketInfo, PolymarketClient,
 };
-use rusty_poly_streak_rsi::strategy::{Prediction, Signal};
+use rusty_poly_signal_runner::strategy::{Prediction, Signal};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 

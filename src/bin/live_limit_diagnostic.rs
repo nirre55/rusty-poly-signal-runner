@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusty_poly_streak_rsi::config::{Config, LimitPriceHighGuard, LimitPriceReference};
-use rusty_poly_streak_rsi::polymarket::{
+use rusty_poly_signal_runner::config::{Config, LimitPriceHighGuard, LimitPriceReference};
+use rusty_poly_signal_runner::polymarket::{
     calculate_available_shares_up_to_price, calculate_limit_order_quote,
     parse_book_reference_price_body, validate_sufficient_usdc_balance, PolymarketClient,
 };

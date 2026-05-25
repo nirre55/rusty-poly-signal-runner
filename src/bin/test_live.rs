@@ -14,9 +14,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use rusty_poly_streak_rsi::config::{Config, ExecutionMode};
-use rusty_poly_streak_rsi::polymarket::PolymarketClient;
-use rusty_poly_streak_rsi::strategy::{Prediction, Signal};
+use rusty_poly_signal_runner::config::{Config, ExecutionMode};
+use rusty_poly_signal_runner::polymarket::PolymarketClient;
+use rusty_poly_signal_runner::strategy::{Prediction, Signal};
 
 #[tokio::main]
 async fn main() -> Result<()> {

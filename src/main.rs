@@ -4,16 +4,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use rusty_poly_streak_rsi::binance::{self, Candle};
-use rusty_poly_streak_rsi::config::{Config, ExecutionMode};
-use rusty_poly_streak_rsi::interval::parse_interval_duration;
-use rusty_poly_streak_rsi::logger::TradeLogger;
-use rusty_poly_streak_rsi::money::MoneyManager;
-use rusty_poly_streak_rsi::polymarket::PolymarketClient;
-use rusty_poly_streak_rsi::runtime_metrics::RuntimeMetrics;
-use rusty_poly_streak_rsi::strategy_factory::create_strategy;
-use rusty_poly_streak_rsi::tracker::{PolymarketReadClient, PositionTracker};
-use rusty_poly_streak_rsi::trading_runtime::{
+use rusty_poly_signal_runner::binance::{self, Candle};
+use rusty_poly_signal_runner::config::{Config, ExecutionMode};
+use rusty_poly_signal_runner::interval::parse_interval_duration;
+use rusty_poly_signal_runner::logger::TradeLogger;
+use rusty_poly_signal_runner::money::MoneyManager;
+use rusty_poly_signal_runner::polymarket::PolymarketClient;
+use rusty_poly_signal_runner::runtime_metrics::RuntimeMetrics;
+use rusty_poly_signal_runner::strategy_factory::create_strategy;
+use rusty_poly_signal_runner::tracker::{PolymarketReadClient, PositionTracker};
+use rusty_poly_signal_runner::trading_runtime::{
     process_closed_candle, PolymarketTradingClient, RuntimeState,
 };
 
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let interval_duration = parse_interval_duration(&config.interval)?;
     info!(
-        "Demarrage rusty-poly-streak-rsi | mode={:?} symbol={} interval={} strategy={} rsi=[{},{}]",
+        "Demarrage rusty-poly-signal-runner | mode={:?} symbol={} interval={} strategy={} rsi=[{},{}]",
         config.execution_mode,
         config.symbol,
         config.interval,

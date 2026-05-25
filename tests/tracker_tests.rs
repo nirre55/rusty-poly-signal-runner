@@ -1,14 +1,14 @@
 use chrono::{Duration, Utc};
-use rusty_poly_streak_rsi::binance::Candle;
-use rusty_poly_streak_rsi::config::{
+use rusty_poly_signal_runner::binance::Candle;
+use rusty_poly_signal_runner::config::{
     Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
     PolymarketSlugFormat,
 };
-use rusty_poly_streak_rsi::logger::{TradeLogger, TradeRecord};
-use rusty_poly_streak_rsi::money::MoneyManager;
-use rusty_poly_streak_rsi::polymarket::PolymarketClient;
-use rusty_poly_streak_rsi::strategy::Prediction;
-use rusty_poly_streak_rsi::tracker::{build_signal_key, PolymarketReadClient, PositionTracker};
+use rusty_poly_signal_runner::logger::{TradeLogger, TradeRecord};
+use rusty_poly_signal_runner::money::MoneyManager;
+use rusty_poly_signal_runner::polymarket::PolymarketClient;
+use rusty_poly_signal_runner::strategy::Prediction;
+use rusty_poly_signal_runner::tracker::{build_signal_key, PolymarketReadClient, PositionTracker};
 use std::collections::VecDeque;
 use std::fs;
 use std::future::Future;
@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 
 fn tmp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "rusty_poly_streak_rsi_tracker_test_{}_{}",
+        "rusty_poly_signal_runner_tracker_test_{}_{}",
         label,
         uuid::Uuid::new_v4()
     ))

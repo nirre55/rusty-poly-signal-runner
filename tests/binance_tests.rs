@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusty_poly_streak_rsi::binance::{parse_klines, Candle};
+use rusty_poly_signal_runner::binance::{parse_klines, Candle};
 use serde_json::json;
 
 fn make_kline_row(

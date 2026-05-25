@@ -1,4 +1,4 @@
-use rusty_poly_streak_rsi::config::{
+use rusty_poly_signal_runner::config::{
     ExecutionMode, LimitPriceReference, MarketOrderType, PolymarketSlugFormat,
 };
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ fn test_config_parses_market_order_type_fak() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("MARKET_ORDER_TYPE", "fak");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.market_order_type, MarketOrderType::Fak);
     clear_config_env();
 }
@@ -36,7 +36,7 @@ fn test_config_rejects_unknown_market_order_type() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("MARKET_ORDER_TYPE", "ioc");
-    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    let err = rusty_poly_signal_runner::config::Config::from_env().unwrap_err();
     assert!(err.to_string().contains("MARKET_ORDER_TYPE"));
     clear_config_env();
 }
@@ -74,7 +74,7 @@ fn clear_config_env() {
 fn without_repo_dotenv<T>(f: impl FnOnce() -> T) -> T {
     let original_dir = std::env::current_dir().unwrap();
     let temp_dir: PathBuf = std::env::temp_dir().join(format!(
-        "rusty_poly_streak_rsi_config_test_{}",
+        "rusty_poly_signal_runner_config_test_{}",
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
@@ -129,7 +129,7 @@ fn test_config_from_env_defaults() {
     std::env::set_var("SYMBOL", "btcusdt");
     std::env::set_var("INTERVAL", "5m");
 
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.symbol, "btcusdt");
     assert_eq!(config.interval, "5m");
     assert_eq!(config.trade_amount_usdc, 10.0); // "__default_test__" non parseable → default
@@ -148,7 +148,7 @@ fn test_config_trade_amount_zero_uses_default() {
     std::env::set_var("EXECUTION_MODE", "dry-run");
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "0");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
     std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
@@ -164,7 +164,7 @@ fn test_config_trade_amount_negative_uses_default() {
     std::env::set_var("EXECUTION_MODE", "dry-run");
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "-50");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
     std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
@@ -180,7 +180,7 @@ fn test_config_trade_amount_invalid_string_uses_default() {
     std::env::set_var("EXECUTION_MODE", "dry-run");
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "abc");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
     std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
@@ -194,7 +194,7 @@ fn test_config_unknown_execution_mode_returns_error() {
     let _guard = env_lock();
     clear_config_env();
     std::env::set_var("EXECUTION_MODE", "MARKET"); // majuscules incorrectes
-    let result = rusty_poly_streak_rsi::config::Config::from_env();
+    let result = rusty_poly_signal_runner::config::Config::from_env();
     assert!(result.is_err());
     std::env::remove_var("EXECUTION_MODE");
     clear_config_env();
@@ -207,7 +207,7 @@ fn test_config_trade_amount_pct_valid_without_fixed_amount() {
     without_repo_dotenv(|| {
         std::env::set_var("EXECUTION_MODE", "dry-run");
         std::env::set_var("TRADE_AMOUNT_PCT", "2.5");
-        let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+        let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
         assert_eq!(config.trade_amount_pct, 2.5);
         assert_eq!(config.trade_amount_usdc, 10.0);
     });
@@ -221,7 +221,7 @@ fn test_config_trade_amount_pct_conflicts_with_fixed_amount() {
     std::env::set_var("EXECUTION_MODE", "dry-run");
     std::env::set_var("TRADE_AMOUNT_PCT", "2.5");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
-    let result = rusty_poly_streak_rsi::config::Config::from_env();
+    let result = rusty_poly_signal_runner::config::Config::from_env();
     assert!(result.is_err());
     clear_config_env();
 }
@@ -235,7 +235,7 @@ fn test_config_parses_excluded_days_and_hours() {
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("EXCLUDED_DAYS", "Sat, sun");
     std::env::set_var("EXCLUDED_HOURS", "0-9,22h-24h,bad,9-9,24-25");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.excluded_days, vec!["sat", "sun"]);
     assert_eq!(config.excluded_hours, vec![(0, 9), (22, 24)]);
     clear_config_env();
@@ -249,7 +249,7 @@ fn test_config_parses_limit_price_offset() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("LIMIT_PRICE_OFFSET", "0.03");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.limit_price_offset, 0.03);
     clear_config_env();
 }
@@ -262,7 +262,7 @@ fn test_config_parses_limit_price_reference_best_bid() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("LIMIT_PRICE_REFERENCE", "best_bid");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.limit_price_reference, LimitPriceReference::BestBid);
     clear_config_env();
 }
@@ -275,7 +275,7 @@ fn test_config_rejects_unknown_limit_price_reference() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("LIMIT_PRICE_REFERENCE", "mid");
-    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    let err = rusty_poly_signal_runner::config::Config::from_env().unwrap_err();
     assert!(err.to_string().contains("LIMIT_PRICE_REFERENCE"));
     clear_config_env();
 }
@@ -290,7 +290,7 @@ fn test_config_parses_limit_price_high_guard() {
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_ENABLED", "true");
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_THRESHOLD", "0.61");
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_PRICE", "0.54");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert!(config.limit_price_high_guard.enabled);
     assert_eq!(config.limit_price_high_guard.threshold, 0.61);
     assert_eq!(config.limit_price_high_guard.price, 0.54);
@@ -307,7 +307,7 @@ fn test_config_rejects_invalid_limit_price_high_guard() {
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_ENABLED", "true");
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_THRESHOLD", "0.60");
     std::env::set_var("LIMIT_PRICE_HIGH_GUARD_PRICE", "0.60");
-    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    let err = rusty_poly_signal_runner::config::Config::from_env().unwrap_err();
     assert!(err.to_string().contains("LIMIT_PRICE_HIGH_GUARD_PRICE"));
     clear_config_env();
 }
@@ -321,7 +321,7 @@ fn test_config_parses_hourly_et_slug_format() {
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("POLYMARKET_SLUG_FORMAT", "hourly_et");
     std::env::set_var("POLYMARKET_SLUG_ASSET", "solana");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(
         config.polymarket_slug_format,
         PolymarketSlugFormat::HourlyEt
@@ -338,7 +338,7 @@ fn test_config_defaults_hourly_asset_from_symbol() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("SYMBOL", "solusdt");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.polymarket_slug_asset, "solana");
     clear_config_env();
 }
@@ -351,7 +351,7 @@ fn test_config_rejects_unknown_slug_format() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("TRADE_AMOUNT_USDC", "10");
     std::env::set_var("POLYMARKET_SLUG_FORMAT", "weekly");
-    let err = rusty_poly_streak_rsi::config::Config::from_env().unwrap_err();
+    let err = rusty_poly_signal_runner::config::Config::from_env().unwrap_err();
     assert!(err.to_string().contains("POLYMARKET_SLUG_FORMAT"));
     clear_config_env();
 }
@@ -365,7 +365,7 @@ fn test_config_debug_redacts_secrets() {
     std::env::set_var("TRADE_AMOUNT_PCT", "0");
     std::env::set_var("POLYMARKET_API_KEY", "super_secret_key");
     std::env::set_var("POLYMARKET_API_SECRET", "super_secret_value");
-    let config = rusty_poly_streak_rsi::config::Config::from_env().unwrap();
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     let debug_str = format!("{:?}", config);
     assert!(
         !debug_str.contains("super_secret_key"),
@@ -393,7 +393,7 @@ fn test_config_market_mode_requires_private_key() {
     without_repo_dotenv(|| {
         std::env::set_var("EXECUTION_MODE", "market");
         std::env::set_var("TRADE_AMOUNT_USDC", "10");
-        let result = rusty_poly_streak_rsi::config::Config::from_env();
+        let result = rusty_poly_signal_runner::config::Config::from_env();
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -412,7 +412,7 @@ fn test_config_market_mode_rejects_invalid_clob_url() {
         std::env::set_var("TRADE_AMOUNT_USDC", "10");
         std::env::set_var("POLYMARKET_PRIVATE_KEY", "abc123");
         std::env::set_var("POLYMARKET_API_URL", "clob.polymarket.com");
-        let result = rusty_poly_streak_rsi::config::Config::from_env();
+        let result = rusty_poly_signal_runner::config::Config::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("http://"));
     });
@@ -428,7 +428,7 @@ fn test_config_proxy_signature_requires_funder() {
         std::env::set_var("TRADE_AMOUNT_USDC", "10");
         std::env::set_var("POLYMARKET_PRIVATE_KEY", "abc123");
         std::env::set_var("POLYMARKET_SIGNATURE_TYPE", "2");
-        let result = rusty_poly_streak_rsi::config::Config::from_env();
+        let result = rusty_poly_signal_runner::config::Config::from_env();
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

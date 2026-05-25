@@ -3703,7 +3703,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty-poly-streak-rsi"
+name = "rusty-poly-signal-runner"
 version = "0.1.0"
 dependencies = [
  "alloy",

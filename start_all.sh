@@ -54,9 +54,9 @@ cargo_args() {
 
 binary_path() {
   if [[ "$CARGO_PROFILE" == "debug" ]]; then
-    echo "$ROOT/target/debug/rusty-poly-streak-rsi"
+    echo "$ROOT/target/debug/rusty-poly-signal-runner"
   else
-    echo "$ROOT/target/release/rusty-poly-streak-rsi"
+    echo "$ROOT/target/release/rusty-poly-signal-runner"
   fi
 }
 
