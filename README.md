@@ -130,6 +130,20 @@ Sur Ubuntu/server :
 ./start_all.sh stop
 ```
 
+Mettre a jour le serveur, arreter les bots, pull Git puis relancer via systemd :
+
+```bash
+chmod +x server_update.sh
+./server_update.sh
+```
+
+Par defaut, ce script utilise `/home/mehdi/rusty-poly-signal-runner` et le service
+`rusty-poly-signal-runner`. Vous pouvez surcharger au besoin :
+
+```bash
+APP_DIR=/home/mehdi/rusty-poly-signal-runner SERVICE_NAME=rusty-poly-signal-runner ./server_update.sh
+```
+
 Variables utiles pour le script Linux :
 
 ```bash
