@@ -24,6 +24,7 @@ type PolymarketTradingFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + S
 
 pub trait PolymarketTradingClient: Send + Sync {
     fn resolve_market<'a>(&'a self, slug: &'a str) -> PolymarketTradingFuture<'a, MarketInfo>;
+    fn get_usdc_balance<'a>(&'a self) -> PolymarketTradingFuture<'a, f64>;
 
     fn place_order<'a>(
         &'a self,
@@ -38,6 +39,10 @@ pub trait PolymarketTradingClient: Send + Sync {
 impl PolymarketTradingClient for PolymarketClient {
     fn resolve_market<'a>(&'a self, slug: &'a str) -> PolymarketTradingFuture<'a, MarketInfo> {
         Box::pin(async move { PolymarketClient::resolve_market(self, slug).await })
+    }
+
+    fn get_usdc_balance<'a>(&'a self) -> PolymarketTradingFuture<'a, f64> {
+        Box::pin(async move { PolymarketClient::get_usdc_balance(self).await })
     }
 
     fn place_order<'a>(
@@ -83,6 +88,41 @@ pub struct RuntimeState {
 fn finish(state: &RuntimeState, action: ClosedCandleAction) -> ClosedCandleAction {
     state.metrics.record(&action);
     action
+}
+
+fn amount_from_balance_pct(balance: f64, pct: f64) -> f64 {
+    let amount = (balance * pct / 100.0 * 100.0).floor() / 100.0;
+    amount.max(1.0)
+}
+
+async fn resolve_trade_amount(config: &Config, state: &RuntimeState) -> f64 {
+    if config.trade_amount_pct <= 0.0
+        || matches!(config.execution_mode, crate::config::ExecutionMode::DryRun)
+    {
+        return state.money_manager.lock().await.current_amount();
+    }
+
+    match state.poly_client.get_usdc_balance().await {
+        Ok(balance) => {
+            let base_amount = amount_from_balance_pct(balance, config.trade_amount_pct);
+            let mut money = state.money_manager.lock().await;
+            money.set_base_amount(base_amount);
+            let trade_amount = money.current_amount();
+            info!(
+                "[MONEY] Balance pre-order fraiche: {:.2}$ | {:.1}% = {:.2}$ | montant courant = {:.2}$",
+                balance, config.trade_amount_pct, base_amount, trade_amount
+            );
+            trade_amount
+        }
+        Err(e) => {
+            let fallback = state.money_manager.lock().await.current_amount();
+            warn!(
+                "[MONEY] Refresh balance pre-order echoue ({}), fallback montant courant = {:.2}$",
+                e, fallback
+            );
+            fallback
+        }
+    }
 }
 
 pub fn spawn_prefetch_next_market(
@@ -238,7 +278,7 @@ pub async fn process_closed_candle(
         }
     };
 
-    let trade_amount = state.money_manager.lock().await.current_amount();
+    let trade_amount = resolve_trade_amount(config, state).await;
     let order_submit_started_at = Utc::now();
 
     let order_result = match state

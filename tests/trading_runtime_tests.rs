@@ -16,7 +16,7 @@ use rusty_poly_signal_runner::trading_runtime::{
 };
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn tmp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -113,9 +113,19 @@ impl Strategy for FixedSignalStrategy {
     }
 }
 
-struct MockRuntimePolymarketClient;
+struct MockRuntimePolymarketClient {
+    balance: f64,
+    placed_amount: Mutex<Option<f64>>,
+}
 
 impl MockRuntimePolymarketClient {
+    fn new(balance: f64) -> Self {
+        Self {
+            balance,
+            placed_amount: Mutex::new(None),
+        }
+    }
+
     fn market(slug: &str) -> MarketInfo {
         MarketInfo {
             condition_id: "condition".to_string(),
@@ -135,12 +145,17 @@ impl PolymarketTradingClient for MockRuntimePolymarketClient {
         Box::pin(async move { Ok(Self::market(slug)) })
     }
 
+    fn get_usdc_balance<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.balance) })
+    }
+
     fn place_order<'a>(
         &'a self,
         _signal: &'a Signal,
         _market: &'a MarketInfo,
         amount_usdc: f64,
     ) -> Pin<Box<dyn Future<Output = Result<OrderResult>> + Send + 'a>> {
+        *self.placed_amount.lock().unwrap() = Some(amount_usdc);
         Box::pin(async move {
             Ok(OrderResult {
                 order_id: "dry-run-test-order".to_string(),
@@ -173,7 +188,7 @@ impl PolymarketReadClient for MockRuntimePolymarketClient {
     }
 
     fn get_usdc_balance<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>> {
-        Box::pin(async move { Ok(10.0) })
+        Box::pin(async move { Ok(self.balance) })
     }
 }
 
@@ -184,7 +199,7 @@ async fn dry_run_closed_candle_flow_writes_trade_and_skips_tracker_pending() {
 
     let config = make_config(dir.to_str().unwrap());
     let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
-    let mock_client = Arc::new(MockRuntimePolymarketClient);
+    let mock_client = Arc::new(MockRuntimePolymarketClient::new(10.0));
     let trading_client: Arc<dyn PolymarketTradingClient> = mock_client.clone();
     let tracker_client: Arc<dyn PolymarketReadClient> = mock_client;
     let money = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
@@ -228,6 +243,59 @@ async fn dry_run_closed_candle_flow_writes_trade_and_skips_tracker_pending() {
     assert!(csv.contains("fixed_test_strategy"));
     assert!(csv.contains("DRY_RUN"));
     assert!(csv.contains("PENDING"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn percent_sizing_refreshes_balance_immediately_before_order() {
+    let dir = tmp_dir("fresh_balance_pct");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut config = make_config(dir.to_str().unwrap());
+    config.execution_mode = ExecutionMode::Limit;
+    config.trade_amount_pct = 5.0;
+    config.trade_amount_usdc = 10.0;
+
+    let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
+    let mock_client = Arc::new(MockRuntimePolymarketClient::new(80.0));
+    let trading_client: Arc<dyn PolymarketTradingClient> = mock_client.clone();
+    let tracker_client: Arc<dyn PolymarketReadClient> = mock_client.clone();
+    let money = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
+        10.0,
+        1.0,
+        0.0,
+        dir.to_str().unwrap(),
+    )));
+    let tracker = Arc::new(PositionTracker::new(
+        tracker_client,
+        logger.clone(),
+        money.clone(),
+        dir.to_str().unwrap(),
+        config.trade_amount_pct,
+    ));
+    let state = RuntimeState {
+        trade_logger: logger,
+        poly_client: trading_client,
+        money_manager: money,
+        tracker,
+        metrics: Arc::new(RuntimeMetrics::default()),
+    };
+    let close_time = Utc.with_ymd_and_hms(2026, 1, 1, 0, 5, 0).unwrap();
+    let candle = make_candle(close_time);
+    let mut strategy = FixedSignalStrategy { emit: true };
+
+    let action = process_closed_candle(
+        &config,
+        Duration::minutes(5),
+        &mut strategy,
+        &state,
+        &candle,
+    )
+    .await;
+
+    assert!(matches!(action, ClosedCandleAction::OrderPlaced { .. }));
+    assert_eq!(*mock_client.placed_amount.lock().unwrap(), Some(4.0));
 
     std::fs::remove_dir_all(&dir).ok();
 }
