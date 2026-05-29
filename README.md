@@ -144,6 +144,13 @@ Par defaut, ce script utilise `/home/mehdi/rusty-poly-signal-runner` et le servi
 APP_DIR=/home/mehdi/rusty-poly-signal-runner SERVICE_NAME=rusty-poly-signal-runner ./server_update.sh
 ```
 
+Resume des trades par strategie :
+
+```bash
+chmod +x trade_summary.sh
+./trade_summary.sh
+```
+
 Variables utiles pour le script Linux :
 
 ```bash
