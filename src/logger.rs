@@ -22,6 +22,10 @@ pub struct TradeRecord {
     pub entry_side: String,
     pub entry_order_type: String,
     pub order_status: String,
+    pub limit_price: Option<f64>,
+    pub execution_price: Option<f64>,
+    pub execution_price_source: Option<String>,
+    pub size_matched: Option<f64>,
     pub signal_to_submit_start_ms: i64,
     pub submit_start_to_ack_ms: i64,
     pub signal_to_ack_ms: i64,
@@ -39,6 +43,10 @@ pub struct PendingBuyTradeRecord<'a> {
     pub prediction: &'a str,
     pub entry_order_type: &'a str,
     pub order_status: &'a str,
+    pub limit_price: Option<f64>,
+    pub execution_price: Option<f64>,
+    pub execution_price_source: Option<&'a str>,
+    pub size_matched: Option<f64>,
     pub latencies: TradeLatencies,
 }
 
@@ -55,6 +63,10 @@ impl TradeRecord {
             entry_side: "BUY".to_string(),
             entry_order_type: input.entry_order_type.to_string(),
             order_status: input.order_status.to_string(),
+            limit_price: input.limit_price,
+            execution_price: input.execution_price,
+            execution_price_source: input.execution_price_source.map(str::to_string),
+            size_matched: input.size_matched,
             signal_to_submit_start_ms: input.latencies.signal_to_submit_start_ms,
             submit_start_to_ack_ms: input.latencies.submit_start_to_ack_ms,
             signal_to_ack_ms: input.latencies.signal_to_ack_ms,
@@ -100,6 +112,10 @@ impl TradeLogger {
                 "entry_side",
                 "entry_order_type",
                 "order_status",
+                "limit_price",
+                "execution_price",
+                "execution_price_source",
+                "size_matched",
                 "signal_to_submit_start_ms",
                 "submit_start_to_ack_ms",
                 "signal_to_ack_ms",
@@ -235,19 +251,25 @@ impl TradeLogger {
             .from_reader(content.as_bytes());
         let headers = rdr.headers()?.clone();
 
-        if headers.iter().any(|h| h == "signal_key") {
+        let new_headers = Self::csv_headers();
+        if headers.iter().eq(new_headers.iter().copied()) {
             return Ok(());
         }
 
         let old_header_len = headers.len();
-        let new_headers = Self::csv_headers();
         let new_header_len = new_headers.len();
+        let has_signal_key = headers.iter().any(|h| h == "signal_key");
 
         let mut migrated_rows = Vec::new();
         for record in rdr.records() {
             let record = record?;
-            let migrated =
-                Self::migrate_record_to_current_schema(&record, old_header_len, new_header_len);
+            let migrated = Self::migrate_record_to_current_schema(
+                &headers,
+                &record,
+                old_header_len,
+                new_header_len,
+                has_signal_key,
+            );
             migrated_rows.push(migrated);
         }
 
@@ -274,15 +296,42 @@ impl TradeLogger {
     }
 
     fn migrate_record_to_current_schema(
+        headers: &StringRecord,
         record: &StringRecord,
         old_header_len: usize,
         new_header_len: usize,
+        has_signal_key: bool,
     ) -> Vec<String> {
         let mut fields: Vec<String> = record.iter().map(|f| f.to_string()).collect();
 
-        if fields.len() == old_header_len {
+        if !has_signal_key && fields.len() == new_header_len {
+            return fields;
+        }
+
+        if !has_signal_key && fields.len() == old_header_len {
             fields.insert(1, String::new());
         }
+
+        if !has_signal_key && fields.len() == old_header_len + 1 {
+            for _ in 0..4 {
+                fields.insert(10, String::new());
+            }
+        }
+
+        if fields.len() == new_header_len {
+            return fields;
+        }
+
+        let mut migrated = vec![String::new(); new_header_len];
+        let new_headers = Self::csv_headers();
+        for (old_idx, header) in headers.iter().enumerate() {
+            if let Some(new_idx) = new_headers.iter().position(|h| h == &header) {
+                if let Some(value) = record.get(old_idx) {
+                    migrated[new_idx] = value.to_string();
+                }
+            }
+        }
+        fields = migrated;
 
         while fields.len() < new_header_len {
             fields.push(String::new());
@@ -294,7 +343,7 @@ impl TradeLogger {
         fields
     }
 
-    fn csv_headers() -> [&'static str; 15] {
+    fn csv_headers() -> [&'static str; 19] {
         [
             "trade_id",
             "signal_key",
@@ -306,6 +355,10 @@ impl TradeLogger {
             "entry_side",
             "entry_order_type",
             "order_status",
+            "limit_price",
+            "execution_price",
+            "execution_price_source",
+            "size_matched",
             "signal_to_submit_start_ms",
             "submit_start_to_ack_ms",
             "signal_to_ack_ms",

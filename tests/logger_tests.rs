@@ -15,6 +15,10 @@ fn make_record(trade_id: &str, prediction: &str) -> TradeRecord {
         entry_side: "BUY".to_string(),
         entry_order_type: "DRY_RUN".to_string(),
         order_status: "DRY_RUN".to_string(),
+        limit_price: None,
+        execution_price: None,
+        execution_price_source: None,
+        size_matched: None,
         signal_to_submit_start_ms: 10,
         submit_start_to_ack_ms: 5,
         signal_to_ack_ms: 15,
@@ -54,6 +58,10 @@ fn test_pending_buy_trade_record_factory_sets_csv_fields() {
         prediction: "UP",
         entry_order_type: "DRY_RUN",
         order_status: "DRY_RUN",
+        limit_price: Some(0.56),
+        execution_price: Some(0.55),
+        execution_price_source: Some("average_price"),
+        size_matched: Some(5.0),
         latencies,
     });
 
@@ -61,6 +69,13 @@ fn test_pending_buy_trade_record_factory_sets_csv_fields() {
     assert_eq!(record.entry_side, "BUY");
     assert_eq!(record.outcome, "PENDING");
     assert_eq!(record.signal_to_ack_ms, 3);
+    assert_eq!(record.limit_price, Some(0.56));
+    assert_eq!(record.execution_price, Some(0.55));
+    assert_eq!(
+        record.execution_price_source.as_deref(),
+        Some("average_price")
+    );
+    assert_eq!(record.size_matched, Some(5.0));
     assert_eq!(record.target_candle_open_time_utc, target_open.to_rfc3339());
 }
 
@@ -238,8 +253,9 @@ old-id,BTCUSDT,5m,2024-01-01T00:00:00+00:00,2024-01-01T00:05:00+00:00,UP,BUY,MAR
     let row = lines.next().unwrap();
 
     assert!(header.contains("signal_key"));
-    assert_eq!(header.split(',').count(), 15);
-    assert_eq!(row.split(',').count(), 15);
+    assert!(header.contains("execution_price"));
+    assert_eq!(header.split(',').count(), 19);
+    assert_eq!(row.split(',').count(), 19);
     assert!(row.starts_with("old-id,"));
     fs::remove_dir_all(&dir).ok();
 }
@@ -263,9 +279,9 @@ new-id,sig-new,BTCUSDT,5m,2024-01-01T00:10:00+00:00,2024-01-01T00:15:00+00:00,DO
 
     let content = fs::read_to_string(&csv_path).unwrap();
     let lines: Vec<_> = content.lines().collect();
-    assert_eq!(lines[0].split(',').count(), 15);
-    assert_eq!(lines[1].split(',').count(), 15);
-    assert_eq!(lines[2].split(',').count(), 15);
+    assert_eq!(lines[0].split(',').count(), 19);
+    assert_eq!(lines[1].split(',').count(), 19);
+    assert_eq!(lines[2].split(',').count(), 19);
     assert!(lines[2].ends_with("MATCHED"));
     fs::remove_dir_all(&dir).ok();
 }

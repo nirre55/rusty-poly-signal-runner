@@ -161,10 +161,10 @@ impl PolymarketTradingClient for MockRuntimePolymarketClient {
                 order_id: "dry-run-test-order".to_string(),
                 status: "DRY_RUN".to_string(),
                 amount_usdc,
-                limit_price: None,
-                execution_price: None,
-                execution_price_source: None,
-                size_matched: None,
+                limit_price: Some(0.56),
+                execution_price: Some(0.55),
+                execution_price_source: Some("average_price".to_string()),
+                size_matched: Some(5.0),
                 submitted_at: Utc::now(),
                 ack_at: Utc::now(),
             })
@@ -243,6 +243,10 @@ async fn dry_run_closed_candle_flow_writes_trade_and_skips_tracker_pending() {
     assert!(csv.contains("fixed_test_strategy"));
     assert!(csv.contains("DRY_RUN"));
     assert!(csv.contains("PENDING"));
+    assert!(csv.contains("0.56"));
+    assert!(csv.contains("0.55"));
+    assert!(csv.contains("average_price"));
+    assert!(csv.contains("5.0"));
 
     std::fs::remove_dir_all(&dir).ok();
 }

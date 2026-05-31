@@ -325,6 +325,10 @@ pub async fn process_closed_candle(
         prediction: &prediction,
         entry_order_type: config.execution_mode.as_str(),
         order_status: &order_result.status,
+        limit_price: order_result.limit_price,
+        execution_price: order_result.execution_price,
+        execution_price_source: order_result.execution_price_source.as_deref(),
+        size_matched: order_result.size_matched,
         latencies,
     });
 
