@@ -8,8 +8,31 @@ use crate::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
 use crate::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
 use crate::strategies::eth_1h_rules_17_min_votes_1::EthH1Rules17;
 use crate::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
+use crate::strategies::five_year_70pct_btc_15m_rules_176_min_votes_1::FiveYear70PctBtcM15Rules176;
+use crate::strategies::five_year_70pct_btc_1h_rules_586_min_votes_1::FiveYear70PctBtcH1Rules586;
+use crate::strategies::five_year_70pct_btc_5m_rules_71_min_votes_1::FiveYear70PctBtcM5Rules71;
+use crate::strategies::five_year_70pct_eth_15m_rules_181_min_votes_1::FiveYear70PctEthM15Rules181;
+use crate::strategies::five_year_70pct_eth_1h_rules_632_min_votes_1::FiveYear70PctEthH1Rules632;
+use crate::strategies::five_year_70pct_eth_5m_rules_75_min_votes_1::FiveYear70PctEthM5Rules75;
 use crate::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
 use crate::strategy::Strategy;
+
+const KNOWN_STRATEGIES: &[&str] = &[
+    "three_candle_rsi7_reversal",
+    "btc_5m_rules_90_min_votes_1",
+    "btc_5m_rules_23_min_votes_1",
+    "btc_15m_rules_18_min_votes_1",
+    "btc_1h_rules_15_min_votes_1",
+    "eth_5m_rules_25_min_votes_1",
+    "eth_15m_rules_24_min_votes_1",
+    "eth_1h_rules_17_min_votes_1",
+    "five_year_70pct_btc_5m_rules_71_min_votes_1",
+    "five_year_70pct_btc_15m_rules_176_min_votes_1",
+    "five_year_70pct_btc_1h_rules_586_min_votes_1",
+    "five_year_70pct_eth_5m_rules_75_min_votes_1",
+    "five_year_70pct_eth_15m_rules_181_min_votes_1",
+    "five_year_70pct_eth_1h_rules_632_min_votes_1",
+];
 
 pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
     match config.strategy.as_str() {
@@ -18,30 +41,41 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
             config.rsi_oversold,
         ))),
         "btc_5m_rules_90_min_votes_1" => Ok(Box::new(BtcRules90::new(config.ensemble_min_votes))),
-        "btc_5m_rules_23_min_votes_1" => Ok(Box::new(BtcRules23::new(
-            config.ensemble_min_votes,
-        ))),
+        "btc_5m_rules_23_min_votes_1" => Ok(Box::new(BtcRules23::new(config.ensemble_min_votes))),
         "btc_15m_rules_18_min_votes_1" => Ok(Box::new(BtcRules18::new(config.ensemble_min_votes))),
-        "btc_1h_rules_15_min_votes_1" => {
-            Ok(Box::new(BtcH1Rules15::new(config.ensemble_min_votes)))
-        },
+        "btc_1h_rules_15_min_votes_1" => Ok(Box::new(BtcH1Rules15::new(config.ensemble_min_votes))),
         "eth_5m_rules_25_min_votes_1" => Ok(Box::new(EthRules25::new(config.ensemble_min_votes))),
-        "eth_15m_rules_24_min_votes_1" => {
-            Ok(Box::new(EthRules24::new(config.ensemble_min_votes)))
-        }
-        "eth_1h_rules_17_min_votes_1" => {
-            Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes)))
-        },
+        "eth_15m_rules_24_min_votes_1" => Ok(Box::new(EthRules24::new(config.ensemble_min_votes))),
+        "eth_1h_rules_17_min_votes_1" => Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes))),
+        "five_year_70pct_btc_5m_rules_71_min_votes_1" => Ok(Box::new(
+            FiveYear70PctBtcM5Rules71::new(config.ensemble_min_votes),
+        )),
+        "five_year_70pct_btc_15m_rules_176_min_votes_1" => Ok(Box::new(
+            FiveYear70PctBtcM15Rules176::new(config.ensemble_min_votes),
+        )),
+        "five_year_70pct_btc_1h_rules_586_min_votes_1" => Ok(Box::new(
+            FiveYear70PctBtcH1Rules586::new(config.ensemble_min_votes),
+        )),
+        "five_year_70pct_eth_5m_rules_75_min_votes_1" => Ok(Box::new(
+            FiveYear70PctEthM5Rules75::new(config.ensemble_min_votes),
+        )),
+        "five_year_70pct_eth_15m_rules_181_min_votes_1" => Ok(Box::new(
+            FiveYear70PctEthM15Rules181::new(config.ensemble_min_votes),
+        )),
+        "five_year_70pct_eth_1h_rules_632_min_votes_1" => Ok(Box::new(
+            FiveYear70PctEthH1Rules632::new(config.ensemble_min_votes),
+        )),
         other => anyhow::bail!(
-            "Stratégie '{}' inconnue. Stratégies disponibles: three_candle_rsi7_reversal, btc_5m_rules_90_min_votes_1, btc_5m_rules_23_min_votes_1, btc_15m_rules_18_min_votes_1, eth_5m_rules_25_min_votes_1, eth_15m_rules_24_min_votes_1",
-            other
+            "Stratégie '{}' inconnue. Stratégies disponibles: {}",
+            other,
+            KNOWN_STRATEGIES.join(", ")
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create_strategy;
+    use super::{create_strategy, KNOWN_STRATEGIES};
     use crate::config::{
         Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
         PolymarketSlugFormat,
@@ -86,19 +120,10 @@ mod tests {
 
     #[test]
     fn creates_all_known_strategies() {
-        for strategy_name in [
-            "three_candle_rsi7_reversal",
-            "btc_5m_rules_90_min_votes_1",
-            "btc_5m_rules_23_min_votes_1",
-            "btc_15m_rules_18_min_votes_1",
-            "btc_1h_rules_15_min_votes_1",
-            "eth_5m_rules_25_min_votes_1",
-            "eth_15m_rules_24_min_votes_1",
-            "eth_1h_rules_17_min_votes_1",
-        ] {
+        for strategy_name in KNOWN_STRATEGIES {
             let strategy = create_strategy(&config_with_strategy(strategy_name))
                 .expect("strategy should be created");
-            assert_eq!(strategy.name(), strategy_name);
+            assert_eq!(strategy.name(), *strategy_name);
         }
     }
 
