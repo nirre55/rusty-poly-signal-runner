@@ -88,9 +88,9 @@ pub struct Config {
     pub logs_dir: String,
     /// Clé privée EVM (hex, avec ou sans "0x"). Requise pour ExecutionMode::Market.
     pub evm_private_key: Option<String>,
-    /// Adresse funder Polymarket (proxy/safe) si différente de l'EOA signataire.
+    /// Adresse funder Polymarket (proxy/safe/deposit wallet) si différente de l'EOA signataire.
     pub polymarket_funder: Option<String>,
-    /// Signature type Polymarket: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE.
+    /// Signature type Polymarket: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE, 3=POLY_1271.
     pub polymarket_signature_type: Option<u8>,
     /// Nom de la stratégie à utiliser (ex: "three_candle_rsi7_reversal").
     pub strategy: String,
@@ -270,10 +270,10 @@ impl Config {
 
         let polymarket_signature_type = match env::var("POLYMARKET_SIGNATURE_TYPE") {
             Ok(raw) => match raw.parse::<u8>() {
-                Ok(v @ 0..=2) => Some(v),
+                Ok(v @ 0..=3) => Some(v),
                 Ok(v) => {
                     warn!(
-                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1 ou 2) — valeur ignorée",
+                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1, 2 ou 3) — valeur ignorée",
                         v
                     );
                     None
@@ -456,7 +456,7 @@ impl Config {
             anyhow::bail!("POLYMARKET_API_URL doit commencer par http:// ou https:// en mode reel");
         }
 
-        if matches!(self.polymarket_signature_type, Some(1 | 2))
+        if matches!(self.polymarket_signature_type, Some(1..=3))
             && self
                 .polymarket_funder
                 .as_deref()
@@ -465,7 +465,7 @@ impl Config {
                 .is_empty()
         {
             anyhow::bail!(
-                "POLYMARKET_FUNDER est requis quand POLYMARKET_SIGNATURE_TYPE vaut 1 ou 2"
+                "POLYMARKET_FUNDER est requis quand POLYMARKET_SIGNATURE_TYPE vaut 1, 2 ou 3"
             );
         }
 

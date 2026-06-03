@@ -103,8 +103,8 @@ POLYMARKET_SLUG_ASSET=solana
 | Variable | Description |
 |---|---|
 | `POLYMARKET_PRIVATE_KEY` | Clé privée EVM du signer. |
-| `POLYMARKET_FUNDER` | Adresse funder si différente de l'EOA. |
-| `POLYMARKET_SIGNATURE_TYPE` | `0` = EOA, `1` = proxy, `2` = Gnosis Safe. |
+| `POLYMARKET_FUNDER` | Adresse funder si différente de l'EOA, incluant proxy, Safe ou deposit wallet. |
+| `POLYMARKET_SIGNATURE_TYPE` | `0` = EOA, `1` = proxy, `2` = Gnosis Safe, `3` = POLY_1271/deposit wallet. |
 
 ## Lancement
 

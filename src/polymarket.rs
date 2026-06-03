@@ -1347,9 +1347,10 @@ impl PolymarketClient {
                 0 => SdkSignatureType::Eoa,
                 1 => SdkSignatureType::Proxy,
                 2 => SdkSignatureType::GnosisSafe,
+                3 => SdkSignatureType::Poly1271,
                 other => {
                     return Err(anyhow!(
-                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1 ou 2)",
+                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1, 2 ou 3)",
                         other
                     ));
                 }
