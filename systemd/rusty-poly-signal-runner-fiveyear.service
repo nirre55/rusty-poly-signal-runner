@@ -1,0 +1,19 @@
+[Unit]
+Description=Rusty Poly Signal Runner fiveyear bots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=mehdi
+WorkingDirectory=/home/mehdi/rusty-poly-signal-runner-fiveyear
+Environment=PATH=/home/mehdi/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RUST_LOG=error
+ExecStart=/bin/bash /home/mehdi/rusty-poly-signal-runner-fiveyear/start_all.sh start
+ExecStop=/bin/bash /home/mehdi/rusty-poly-signal-runner-fiveyear/start_all.sh stop
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
