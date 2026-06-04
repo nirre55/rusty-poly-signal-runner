@@ -7,7 +7,7 @@ use chrono_tz::America::New_York;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
-use polymarket_client_sdk_v2::auth::Normal;
+use polymarket_client_sdk_v2::auth::{Credentials as SdkCredentials, Normal};
 use polymarket_client_sdk_v2::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
 use polymarket_client_sdk_v2::clob::types::{
     Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide,
@@ -1336,9 +1336,17 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Market"))?;
 
-        let auth_builder = SdkClobClient::new(&self.clob_api_base, SdkConfig::default())
+        let mut auth_builder = SdkClobClient::new(&self.clob_api_base, SdkConfig::default())
             .map_err(|e| anyhow!("SDK client init: {}", e))?
             .authentication_builder(sdk_signer);
+
+        let explicit_credentials = self.sdk_credentials_from_config()?;
+        let auth_source = if let Some(credentials) = explicit_credentials {
+            auth_builder = auth_builder.credentials(credentials);
+            "config"
+        } else {
+            "derived"
+        };
 
         let client = if let Some(funder) = self.config.polymarket_funder.as_deref() {
             let funder = Address::from_str(funder)
@@ -1355,6 +1363,13 @@ impl PolymarketClient {
                     ));
                 }
             };
+            info!(
+                "Polymarket SDK auth | signer={} funder={} signature_type={:?} credentials={}",
+                sdk_signer.address(),
+                funder,
+                signature_type,
+                auth_source
+            );
             auth_builder
                 .funder(funder)
                 .signature_type(signature_type)
@@ -1362,6 +1377,11 @@ impl PolymarketClient {
                 .await
                 .map_err(|e| anyhow!("SDK authenticate avec funder: {}", e))?
         } else {
+            info!(
+                "Polymarket SDK auth | signer={} funder=<none> signature_type=Eoa credentials={}",
+                sdk_signer.address(),
+                auth_source
+            );
             auth_builder
                 .authenticate()
                 .await
@@ -1371,6 +1391,31 @@ impl PolymarketClient {
         info!("Client SDK Polymarket authentifié et mis en cache");
         *guard = Some(client.clone());
         Ok(client)
+    }
+
+    fn sdk_credentials_from_config(&self) -> Result<Option<SdkCredentials>> {
+        let api_key = self.config.polymarket_api_key.trim();
+        let api_secret = self.config.polymarket_api_secret.trim();
+        let api_passphrase = self.config.polymarket_api_passphrase.trim();
+
+        if api_key.is_empty() && api_secret.is_empty() && api_passphrase.is_empty() {
+            return Ok(None);
+        }
+
+        if api_key.is_empty() || api_secret.is_empty() || api_passphrase.is_empty() {
+            return Err(anyhow!(
+                "POLYMARKET_API_KEY, POLYMARKET_API_SECRET et POLYMARKET_API_PASSPHRASE doivent etre fournis ensemble"
+            ));
+        }
+
+        let key =
+            Uuid::parse_str(api_key).map_err(|e| anyhow!("POLYMARKET_API_KEY invalide: {}", e))?;
+
+        Ok(Some(SdkCredentials::new(
+            key,
+            api_secret.to_string(),
+            api_passphrase.to_string(),
+        )))
     }
 
     async fn submit_market_order(

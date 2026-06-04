@@ -58,6 +58,8 @@ fn clear_config_env() {
         "INTERVAL",
         "POLYMARKET_API_KEY",
         "POLYMARKET_API_SECRET",
+        "POLYMARKET_API_PASSPHRASE",
+        "POLYMARKET_API_PASSPHRASE_V2",
         "POLYMARKET_API_URL",
         "POLYMARKET_SLUG_FORMAT",
         "POLYMARKET_SLUG_ASSET",

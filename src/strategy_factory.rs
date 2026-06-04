@@ -90,6 +90,7 @@ mod tests {
             trade_amount_usdc: 10.0,
             polymarket_api_key: String::new(),
             polymarket_api_secret: String::new(),
+            polymarket_api_passphrase: String::new(),
             polymarket_api_url: "https://clob.polymarket.com".to_string(),
             logs_dir: "logs".to_string(),
             evm_private_key: None,

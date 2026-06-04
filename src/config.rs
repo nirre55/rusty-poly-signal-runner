@@ -84,6 +84,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub polymarket_api_secret: String,
     #[allow(dead_code)]
+    pub polymarket_api_passphrase: String,
+    #[allow(dead_code)]
     pub polymarket_api_url: String,
     pub logs_dir: String,
     /// Clé privée EVM (hex, avec ou sans "0x"). Requise pour ExecutionMode::Market.
@@ -136,6 +138,7 @@ impl std::fmt::Debug for Config {
             .field("trade_amount_usdc", &self.trade_amount_usdc)
             .field("polymarket_api_key", &"[REDACTED]")
             .field("polymarket_api_secret", &"[REDACTED]")
+            .field("polymarket_api_passphrase", &"[REDACTED]")
             .field("polymarket_api_url", &self.polymarket_api_url)
             .field("logs_dir", &self.logs_dir)
             .field("evm_private_key", &"[REDACTED]")
@@ -376,6 +379,9 @@ impl Config {
             trade_amount_usdc,
             polymarket_api_key: env::var("POLYMARKET_API_KEY").unwrap_or_default(),
             polymarket_api_secret: env::var("POLYMARKET_API_SECRET").unwrap_or_default(),
+            polymarket_api_passphrase: env::var("POLYMARKET_API_PASSPHRASE")
+                .or_else(|_| env::var("POLYMARKET_API_PASSPHRASE_V2"))
+                .unwrap_or_default(),
             polymarket_api_url: env::var("POLYMARKET_API_URL")
                 .unwrap_or_else(|_| "https://clob.polymarket.com".to_string()),
             logs_dir: env::var("LOGS_DIR").unwrap_or_else(|_| "logs".to_string()),
@@ -466,6 +472,21 @@ impl Config {
         {
             anyhow::bail!(
                 "POLYMARKET_FUNDER est requis quand POLYMARKET_SIGNATURE_TYPE vaut 1, 2 ou 3"
+            );
+        }
+
+        let api_credential_fields = [
+            self.polymarket_api_key.trim(),
+            self.polymarket_api_secret.trim(),
+            self.polymarket_api_passphrase.trim(),
+        ];
+        let provided_count = api_credential_fields
+            .iter()
+            .filter(|value| !value.is_empty())
+            .count();
+        if provided_count > 0 && provided_count < api_credential_fields.len() {
+            anyhow::bail!(
+                "POLYMARKET_API_KEY, POLYMARKET_API_SECRET et POLYMARKET_API_PASSPHRASE doivent etre fournis ensemble"
             );
         }
 
