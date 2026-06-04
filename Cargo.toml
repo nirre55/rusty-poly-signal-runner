@@ -23,4 +23,4 @@ alloy = { version = "1", features = ["signer-local", "signers"] }
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
-polymarket_client_sdk_v2 = { version = "0.5", features = ["clob"] }
+polymarket_client_sdk_v2 = { version = "=0.6.0-canary.1", features = ["clob"] }
