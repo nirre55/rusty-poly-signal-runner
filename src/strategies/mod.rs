@@ -5,6 +5,7 @@ pub mod btc_5m_rules_90_min_votes_1;
 pub mod eth_15m_rules_24_min_votes_1;
 pub mod eth_1h_rules_17_min_votes_1;
 pub mod eth_5m_rules_25_min_votes_1;
+pub mod eth_5m_rules_542_min_votes_1;
 pub mod five_year_70pct_btc_15m_rules_176_min_votes_1;
 pub mod five_year_70pct_btc_1h_rules_586_min_votes_1;
 pub mod five_year_70pct_btc_5m_rules_71_min_votes_1;

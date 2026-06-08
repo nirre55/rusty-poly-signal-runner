@@ -27,6 +27,7 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 | `btc_15m_rules_18_min_votes_1` | BTC 15m | Ensemble de 18 micro-règles. |
 | `btc_1h_rules_15_min_votes_1` | BTC 1h | Ensemble de 15 micro-règles H1. |
 | `eth_5m_rules_25_min_votes_1` | ETH 5m | Ensemble de 25 micro-règles. |
+| `eth_5m_rules_542_min_votes_1` | ETH 5m | Ensemble simplifie de 542 micro-regles. |
 | `eth_15m_rules_24_min_votes_1` | ETH 15m | Ensemble de 24 micro-règles. |
 | `eth_1h_rules_17_min_votes_1` | ETH 1h | Ensemble de 17 micro-règles H1. |
 | `five_year_70pct_btc_5m_rules_71_min_votes_1` | BTC 5m | Ensemble FIVE_YEAR_70PCT de 71 micro-regles. |

@@ -8,6 +8,7 @@ use crate::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
 use crate::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
 use crate::strategies::eth_1h_rules_17_min_votes_1::EthH1Rules17;
 use crate::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
+use crate::strategies::eth_5m_rules_542_min_votes_1::EthRules542;
 use crate::strategies::five_year_70pct_btc_15m_rules_176_min_votes_1::FiveYear70PctBtcM15Rules176;
 use crate::strategies::five_year_70pct_btc_1h_rules_586_min_votes_1::FiveYear70PctBtcH1Rules586;
 use crate::strategies::five_year_70pct_btc_5m_rules_71_min_votes_1::FiveYear70PctBtcM5Rules71;
@@ -24,6 +25,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "btc_15m_rules_18_min_votes_1",
     "btc_1h_rules_15_min_votes_1",
     "eth_5m_rules_25_min_votes_1",
+    "eth_5m_rules_542_min_votes_1",
     "eth_15m_rules_24_min_votes_1",
     "eth_1h_rules_17_min_votes_1",
     "five_year_70pct_btc_5m_rules_71_min_votes_1",
@@ -45,6 +47,7 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
         "btc_15m_rules_18_min_votes_1" => Ok(Box::new(BtcRules18::new(config.ensemble_min_votes))),
         "btc_1h_rules_15_min_votes_1" => Ok(Box::new(BtcH1Rules15::new(config.ensemble_min_votes))),
         "eth_5m_rules_25_min_votes_1" => Ok(Box::new(EthRules25::new(config.ensemble_min_votes))),
+        "eth_5m_rules_542_min_votes_1" => Ok(Box::new(EthRules542::new(config.ensemble_min_votes))),
         "eth_15m_rules_24_min_votes_1" => Ok(Box::new(EthRules24::new(config.ensemble_min_votes))),
         "eth_1h_rules_17_min_votes_1" => Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes))),
         "five_year_70pct_btc_5m_rules_71_min_votes_1" => Ok(Box::new(
