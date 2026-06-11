@@ -138,6 +138,28 @@ Sur Ubuntu/server :
 ./start_all.sh stop
 ```
 
+Installer une nouvelle instance systemd depuis le dossier clone courant :
+
+```bash
+chmod +x install_systemd.sh
+./install_systemd.sh rusty-poly-signal-runner-single
+```
+
+Options utiles :
+
+```bash
+./install_systemd.sh rusty-poly-signal-runner-single --rust-log info
+./install_systemd.sh rusty-poly-signal-runner-single --no-start
+```
+
+Commandes de suivi :
+
+```bash
+sudo systemctl status rusty-poly-signal-runner-single --no-pager -l
+./start_all.sh status
+tail -f logs/supervisor/*.console.log
+```
+
 Mettre a jour le serveur, arreter les bots, pull Git puis relancer via systemd :
 
 ```bash
