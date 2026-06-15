@@ -30,6 +30,7 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 | `eth_5m_rules_25_min_votes_1` | ETH 5m | Ensemble de 25 micro-règles. |
 | `eth_5m_rules_542_min_votes_1` | ETH 5m | Ensemble simplifie de 542 micro-regles. |
 | `eth_15m_rules_24_min_votes_1` | ETH 15m | Ensemble de 24 micro-règles. |
+| `eth_15m_rules_663_min_votes_1` | ETH 15m | Ensemble de 663 micro-regles. |
 | `eth_1h_rules_17_min_votes_1` | ETH 1h | Ensemble de 17 micro-règles H1. |
 | `five_year_70pct_btc_5m_rules_71_min_votes_1` | BTC 5m | Ensemble FIVE_YEAR_70PCT de 71 micro-regles. |
 | `five_year_70pct_btc_15m_rules_176_min_votes_1` | BTC 15m | Ensemble FIVE_YEAR_70PCT de 176 micro-regles. |
@@ -73,6 +74,7 @@ Variables principales :
 | `ENSEMBLE_MIN_VOTES` | Nombre minimal de votes pour les stratégies ensemble. | `1` |
 | `LIMIT_PRICE_REFERENCE` | Prix de reference des ordres limite: `best_ask` ou `best_bid`. | `best_ask` |
 | `LIMIT_PRICE_OFFSET` | Offset signe ajoute au prix de reference en mode `limit`, ex. `0.01`, `0`, `-0.01`. | `0.01` |
+| `LIMIT_PRICE_FIXED` | Prix limite fixe optionnel, ex. `0.50`. Si defini, ignore reference, offset et high guard. | Aucun |
 | `LIMIT_PRICE_HIGH_GUARD_ENABLED` | Active le garde-fou des prix limite eleves. Si actif et que le prix calcule depasse le seuil, le bot force le prix configure. | `false` |
 | `LIMIT_PRICE_HIGH_GUARD_THRESHOLD` | Seuil du garde-fou, ex. `0.60`. Le garde-fou s'applique seulement si le prix calcule est strictement superieur au seuil. | `0.60` |
 | `LIMIT_PRICE_HIGH_GUARD_PRICE` | Prix limite force par le garde-fou, ex. `0.55`. Doit etre inferieur au seuil. | `0.55` |

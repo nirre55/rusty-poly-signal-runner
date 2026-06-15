@@ -129,6 +129,7 @@ pub struct LimitOrderQuote {
     pub adjusted_to_min_size: bool,
     pub high_guard_applied: bool,
     pub uncapped_limit_price: f64,
+    pub fixed_price_applied: bool,
 }
 
 #[derive(Deserialize)]
@@ -290,11 +291,18 @@ pub fn calculate_limit_order_quote(
     min_size: f64,
     reference_price: Option<f64>,
     limit_price_offset: f64,
+    fixed_price: Option<f64>,
     high_guard: LimitPriceHighGuard,
 ) -> LimitOrderQuote {
-    let base_price = reference_price.unwrap_or(0.50);
-    let uncapped_limit_price = (base_price + limit_price_offset).clamp(0.01, 0.99);
-    let high_guard_applied = high_guard.enabled && uncapped_limit_price > high_guard.threshold;
+    let fixed_price_applied = fixed_price.is_some();
+    let uncapped_limit_price = fixed_price
+        .unwrap_or_else(|| {
+            let base_price = reference_price.unwrap_or(0.50);
+            base_price + limit_price_offset
+        })
+        .clamp(0.01, 0.99);
+    let high_guard_applied =
+        !fixed_price_applied && high_guard.enabled && uncapped_limit_price > high_guard.threshold;
     let limit_price = if high_guard_applied {
         high_guard.price.clamp(0.01, 0.99)
     } else {
@@ -311,6 +319,7 @@ pub fn calculate_limit_order_quote(
             adjusted_to_min_size: true,
             high_guard_applied,
             uncapped_limit_price,
+            fixed_price_applied,
         }
     } else {
         LimitOrderQuote {
@@ -320,6 +329,7 @@ pub fn calculate_limit_order_quote(
             adjusted_to_min_size: false,
             high_guard_applied,
             uncapped_limit_price,
+            fixed_price_applied,
         }
     }
 }
@@ -874,7 +884,7 @@ impl PolymarketClient {
         calculate_available_shares_up_to_price(&body, limit_price)
     }
 
-    /// Ordre limite GTC au prix `LIMIT_PRICE_REFERENCE + LIMIT_PRICE_OFFSET`.
+    /// Ordre limite GTC au prix `LIMIT_PRICE_FIXED` si defini, sinon `LIMIT_PRICE_REFERENCE + LIMIT_PRICE_OFFSET`.
     async fn submit_limit_order(
         &self,
         token_id_str: &str,
@@ -889,39 +899,51 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Limit"))?;
 
+        let fixed_price = self.config.limit_price_fixed;
         let t_book = Instant::now();
         let reference = self.config.limit_price_reference;
-        let reference_price = self.get_limit_reference_price(token_id_str).await;
+        let reference_price = if fixed_price.is_some() {
+            None
+        } else {
+            self.get_limit_reference_price(token_id_str).await
+        };
         let book_ms = t_book.elapsed().as_millis();
         let quote = calculate_limit_order_quote(
             amount_usdc,
             min_size,
             reference_price,
             self.config.limit_price_offset,
+            fixed_price,
             self.config.limit_price_high_guard,
         );
 
-        let limit_price = match reference_price {
-            Some(price) => {
-                let p = quote.limit_price;
-                info!(
-                    "[LIMIT] reference={} price={:.4} offset={:.4} -> limit_price={:.4} (book={}ms)",
-                    reference.as_str(),
-                    price,
-                    self.config.limit_price_offset,
-                    p,
-                    book_ms
-                );
-                p
-            }
-            None => {
-                let fallback = quote.limit_price;
-                warn!(
-                    "[LIMIT] reference={} indisponible - fallback price={:.4}",
-                    reference.as_str(),
+        let limit_price = if quote.fixed_price_applied {
+            let p = quote.limit_price;
+            info!("[LIMIT] fixed price={:.4}", p);
+            p
+        } else {
+            match reference_price {
+                Some(price) => {
+                    let p = quote.limit_price;
+                    info!(
+                        "[LIMIT] reference={} price={:.4} offset={:.4} -> limit_price={:.4} (book={}ms)",
+                        reference.as_str(),
+                        price,
+                        self.config.limit_price_offset,
+                        p,
+                        book_ms
+                    );
+                    p
+                }
+                None => {
+                    let fallback = quote.limit_price;
+                    warn!(
+                        "[LIMIT] reference={} indisponible - fallback price={:.4}",
+                        reference.as_str(),
+                        fallback
+                    );
                     fallback
-                );
-                fallback
+                }
             }
         };
 

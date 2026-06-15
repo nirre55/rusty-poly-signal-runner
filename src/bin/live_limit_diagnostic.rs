@@ -27,6 +27,7 @@ struct QuoteRequest<'a> {
     min_size: f64,
     limit_price_reference: LimitPriceReference,
     limit_price_offset: f64,
+    limit_price_fixed: Option<f64>,
     limit_price_high_guard: LimitPriceHighGuard,
 }
 
@@ -66,12 +67,16 @@ async fn main() -> Result<()> {
     };
 
     println!(
-        "balance={:.2} USDC requested={:.2} USDC min_size={:.2} shares reference={} offset={:.4} high_guard={} threshold={:.4} price={:.4}",
+        "balance={:.2} USDC requested={:.2} USDC min_size={:.2} shares reference={} offset={:.4} fixed={} high_guard={} threshold={:.4} price={:.4}",
         balance,
         requested_usdc,
         market.order_min_size,
         config.limit_price_reference.as_str(),
         config.limit_price_offset,
+        config
+            .limit_price_fixed
+            .map(|price| format!("{:.4}", price))
+            .unwrap_or_else(|| "none".to_string()),
         config.limit_price_high_guard.enabled,
         config.limit_price_high_guard.threshold,
         config.limit_price_high_guard.price
@@ -88,6 +93,7 @@ async fn main() -> Result<()> {
             min_size: market.order_min_size,
             limit_price_reference: config.limit_price_reference,
             limit_price_offset: config.limit_price_offset,
+            limit_price_fixed: config.limit_price_fixed,
             limit_price_high_guard: config.limit_price_high_guard,
         },
     )
@@ -103,6 +109,7 @@ async fn main() -> Result<()> {
             min_size: market.order_min_size,
             limit_price_reference: config.limit_price_reference,
             limit_price_offset: config.limit_price_offset,
+            limit_price_fixed: config.limit_price_fixed,
             limit_price_high_guard: config.limit_price_high_guard,
         },
     )
@@ -141,6 +148,7 @@ async fn quote_token<'a>(
         request.min_size,
         reference_price,
         request.limit_price_offset,
+        request.limit_price_fixed,
         request.limit_price_high_guard,
     );
     let available_shares_at_limit =

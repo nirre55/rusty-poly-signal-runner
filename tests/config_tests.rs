@@ -50,6 +50,7 @@ fn clear_config_env() {
         "EXCLUDED_HOURS",
         "LIMIT_PRICE_REFERENCE",
         "LIMIT_PRICE_OFFSET",
+        "LIMIT_PRICE_FIXED",
         "LIMIT_PRICE_HIGH_GUARD_ENABLED",
         "LIMIT_PRICE_HIGH_GUARD_THRESHOLD",
         "LIMIT_PRICE_HIGH_GUARD_PRICE",
@@ -253,6 +254,32 @@ fn test_config_parses_limit_price_offset() {
     std::env::set_var("LIMIT_PRICE_OFFSET", "0.03");
     let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
     assert_eq!(config.limit_price_offset, 0.03);
+    clear_config_env();
+}
+
+#[test]
+fn test_config_parses_limit_price_fixed() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_FIXED", "0.50");
+    let config = rusty_poly_signal_runner::config::Config::from_env().unwrap();
+    assert_eq!(config.limit_price_fixed, Some(0.50));
+    clear_config_env();
+}
+
+#[test]
+fn test_config_rejects_invalid_limit_price_fixed() {
+    let _guard = env_lock();
+    clear_config_env();
+    std::env::set_var("EXECUTION_MODE", "dry-run");
+    std::env::set_var("TRADE_AMOUNT_PCT", "0");
+    std::env::set_var("TRADE_AMOUNT_USDC", "10");
+    std::env::set_var("LIMIT_PRICE_FIXED", "1.10");
+    let err = rusty_poly_signal_runner::config::Config::from_env().unwrap_err();
+    assert!(err.to_string().contains("LIMIT_PRICE_FIXED"));
     clear_config_env();
 }
 

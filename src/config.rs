@@ -123,6 +123,8 @@ pub struct Config {
     pub limit_price_reference: LimitPriceReference,
     /// Offset signe ajoute au prix de reference (ex: 0.01, 0, -0.01). Defaut: 0.01
     pub limit_price_offset: f64,
+    /// Prix limite fixe optionnel. Si defini, ignore reference, offset et high guard.
+    pub limit_price_fixed: Option<f64>,
     /// Garde-fou optionnel: si le prix limite depasse threshold, force price.
     pub limit_price_high_guard: LimitPriceHighGuard,
     pub market_order_type: MarketOrderType,
@@ -158,6 +160,7 @@ impl std::fmt::Debug for Config {
             .field("ensemble_min_votes", &self.ensemble_min_votes)
             .field("limit_price_reference", &self.limit_price_reference)
             .field("limit_price_offset", &self.limit_price_offset)
+            .field("limit_price_fixed", &self.limit_price_fixed)
             .field("limit_price_high_guard", &self.limit_price_high_guard)
             .field("market_order_type", &self.market_order_type)
             .finish()
@@ -339,6 +342,20 @@ impl Config {
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.55),
         };
+        let limit_price_fixed = env::var("LIMIT_PRICE_FIXED")
+            .ok()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.parse::<f64>())
+                }
+            })
+            .transpose()
+            .map_err(|_| {
+                anyhow::anyhow!("LIMIT_PRICE_FIXED doit etre un nombre entre 0.01 et 0.99")
+            })?;
 
         let excluded_days = env::var("EXCLUDED_DAYS")
             .unwrap_or_default()
@@ -410,6 +427,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.01),
+            limit_price_fixed,
             limit_price_high_guard,
             market_order_type,
         };
@@ -418,6 +436,15 @@ impl Config {
     }
 
     pub fn validate_for_startup(&self) -> Result<()> {
+        if let Some(price) = self.limit_price_fixed {
+            if !(0.01..=0.99).contains(&price) {
+                anyhow::bail!(
+                    "LIMIT_PRICE_FIXED={} invalide - doit etre entre 0.01 et 0.99",
+                    price
+                );
+            }
+        }
+
         if self.limit_price_high_guard.enabled {
             let guard = self.limit_price_high_guard;
             if !(0.01..=0.99).contains(&guard.threshold) {

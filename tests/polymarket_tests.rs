@@ -44,6 +44,7 @@ fn make_config(mode: ExecutionMode) -> Config {
         ensemble_min_votes: 1,
         limit_price_reference: LimitPriceReference::BestAsk,
         limit_price_offset: 0.01,
+        limit_price_fixed: None,
         limit_price_high_guard: disabled_high_guard(),
         market_order_type: MarketOrderType::Fok,
     }
@@ -327,7 +328,8 @@ fn test_parse_order_status_body_rejects_missing_status_with_context() {
 
 #[test]
 fn test_calculate_limit_order_quote_uses_offset_and_caps_price() {
-    let quote = calculate_limit_order_quote(10.0, 5.0, Some(0.985), 0.02, disabled_high_guard());
+    let quote =
+        calculate_limit_order_quote(10.0, 5.0, Some(0.985), 0.02, None, disabled_high_guard());
 
     assert_eq!(quote.limit_price, 0.99);
     assert!(!quote.adjusted_to_min_size);
@@ -336,7 +338,7 @@ fn test_calculate_limit_order_quote_uses_offset_and_caps_price() {
 
 #[test]
 fn test_calculate_limit_order_quote_adjusts_to_min_size() {
-    let quote = calculate_limit_order_quote(1.0, 5.0, Some(0.4), 0.01, disabled_high_guard());
+    let quote = calculate_limit_order_quote(1.0, 5.0, Some(0.4), 0.01, None, disabled_high_guard());
 
     assert_eq!(quote.limit_price, 0.41000000000000003);
     assert_eq!(quote.effective_usdc, 2.06);
@@ -345,14 +347,16 @@ fn test_calculate_limit_order_quote_adjusts_to_min_size() {
 
 #[test]
 fn test_calculate_limit_order_quote_accepts_negative_offset() {
-    let quote = calculate_limit_order_quote(10.0, 5.0, Some(0.55), -0.02, disabled_high_guard());
+    let quote =
+        calculate_limit_order_quote(10.0, 5.0, Some(0.55), -0.02, None, disabled_high_guard());
 
     assert_eq!(quote.limit_price, 0.53);
 }
 
 #[test]
 fn test_calculate_limit_order_quote_clamps_negative_offset_to_min_price() {
-    let quote = calculate_limit_order_quote(10.0, 5.0, Some(0.02), -0.05, disabled_high_guard());
+    let quote =
+        calculate_limit_order_quote(10.0, 5.0, Some(0.02), -0.05, None, disabled_high_guard());
 
     assert_eq!(quote.limit_price, 0.01);
 }
@@ -364,6 +368,7 @@ fn test_calculate_limit_order_quote_applies_high_price_guard() {
         5.0,
         Some(0.62),
         0.01,
+        None,
         LimitPriceHighGuard {
             enabled: true,
             threshold: 0.60,
@@ -377,12 +382,34 @@ fn test_calculate_limit_order_quote_applies_high_price_guard() {
 }
 
 #[test]
+fn test_calculate_limit_order_quote_uses_fixed_price() {
+    let quote = calculate_limit_order_quote(
+        10.0,
+        5.0,
+        Some(0.62),
+        0.05,
+        Some(0.50),
+        LimitPriceHighGuard {
+            enabled: true,
+            threshold: 0.40,
+            price: 0.35,
+        },
+    );
+
+    assert_eq!(quote.limit_price, 0.50);
+    assert_eq!(quote.uncapped_limit_price, 0.50);
+    assert!(quote.fixed_price_applied);
+    assert!(!quote.high_guard_applied);
+}
+
+#[test]
 fn test_calculate_limit_order_quote_does_not_apply_high_price_guard_at_threshold() {
     let quote = calculate_limit_order_quote(
         10.0,
         5.0,
         Some(0.59),
         0.01,
+        None,
         LimitPriceHighGuard {
             enabled: true,
             threshold: 0.60,
