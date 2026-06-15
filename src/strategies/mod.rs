@@ -1,4 +1,5 @@
 pub mod btc_15m_rules_18_min_votes_1;
+pub mod btc_15m_rules_461_min_votes_1;
 pub mod btc_1h_rules_15_min_votes_1;
 pub mod btc_5m_rules_23_min_votes_1;
 pub mod btc_5m_rules_90_min_votes_1;
