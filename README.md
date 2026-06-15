@@ -24,6 +24,7 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 | `three_candle_rsi7_reversal` | BTC 5m | Reversal après 3 bougies de même couleur + RSI7 + filtres range/body. |
 | `btc_5m_rules_90_min_votes_1` | BTC 5m | Ensemble de 90 micro-règles. |
 | `btc_5m_rules_23_min_votes_1` | BTC 5m | Ensemble combine de 23 micro-strategies, `min_votes=1`. |
+| `btc_5m_rules_626_min_votes_1` | BTC 5m | Ensemble de 626 micro-regles. |
 | `btc_15m_rules_18_min_votes_1` | BTC 15m | Ensemble de 18 micro-règles. |
 | `btc_15m_rules_461_min_votes_1` | BTC 15m | Ensemble de 461 micro-regles. |
 | `btc_1h_rules_15_min_votes_1` | BTC 1h | Ensemble de 15 micro-règles H1. |
@@ -32,6 +33,7 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 | `eth_15m_rules_24_min_votes_1` | ETH 15m | Ensemble de 24 micro-règles. |
 | `eth_15m_rules_663_min_votes_1` | ETH 15m | Ensemble de 663 micro-regles. |
 | `eth_1h_rules_17_min_votes_1` | ETH 1h | Ensemble de 17 micro-règles H1. |
+| `eth_1h_rules_210_min_votes_1` | ETH 1h | Ensemble de 210 micro-regles H1. |
 | `five_year_70pct_btc_5m_rules_71_min_votes_1` | BTC 5m | Ensemble FIVE_YEAR_70PCT de 71 micro-regles. |
 | `five_year_70pct_btc_15m_rules_176_min_votes_1` | BTC 15m | Ensemble FIVE_YEAR_70PCT de 176 micro-regles. |
 | `five_year_70pct_btc_1h_rules_586_min_votes_1` | BTC 1h | Ensemble FIVE_YEAR_70PCT de 586 micro-regles. |

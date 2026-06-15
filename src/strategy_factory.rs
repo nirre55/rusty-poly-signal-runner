@@ -5,10 +5,12 @@ use crate::strategies::btc_15m_rules_18_min_votes_1::BtcRules18;
 use crate::strategies::btc_15m_rules_461_min_votes_1::BtcM15Rules461;
 use crate::strategies::btc_1h_rules_15_min_votes_1::BtcH1Rules15;
 use crate::strategies::btc_5m_rules_23_min_votes_1::BtcRules23;
+use crate::strategies::btc_5m_rules_626_min_votes_1::BtcRules626;
 use crate::strategies::btc_5m_rules_90_min_votes_1::BtcRules90;
 use crate::strategies::eth_15m_rules_24_min_votes_1::EthRules24;
 use crate::strategies::eth_15m_rules_663_min_votes_1::EthM15Rules663;
 use crate::strategies::eth_1h_rules_17_min_votes_1::EthH1Rules17;
+use crate::strategies::eth_1h_rules_210_min_votes_1::EthH1Rules210;
 use crate::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
 use crate::strategies::eth_5m_rules_542_min_votes_1::EthRules542;
 use crate::strategies::five_year_70pct_btc_15m_rules_176_min_votes_1::FiveYear70PctBtcM15Rules176;
@@ -24,6 +26,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "three_candle_rsi7_reversal",
     "btc_5m_rules_90_min_votes_1",
     "btc_5m_rules_23_min_votes_1",
+    "btc_5m_rules_626_min_votes_1",
     "btc_15m_rules_18_min_votes_1",
     "btc_15m_rules_461_min_votes_1",
     "btc_1h_rules_15_min_votes_1",
@@ -32,6 +35,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "eth_15m_rules_24_min_votes_1",
     "eth_15m_rules_663_min_votes_1",
     "eth_1h_rules_17_min_votes_1",
+    "eth_1h_rules_210_min_votes_1",
     "five_year_70pct_btc_5m_rules_71_min_votes_1",
     "five_year_70pct_btc_15m_rules_176_min_votes_1",
     "five_year_70pct_btc_1h_rules_586_min_votes_1",
@@ -48,6 +52,7 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
         ))),
         "btc_5m_rules_90_min_votes_1" => Ok(Box::new(BtcRules90::new(config.ensemble_min_votes))),
         "btc_5m_rules_23_min_votes_1" => Ok(Box::new(BtcRules23::new(config.ensemble_min_votes))),
+        "btc_5m_rules_626_min_votes_1" => Ok(Box::new(BtcRules626::new(config.ensemble_min_votes))),
         "btc_15m_rules_18_min_votes_1" => Ok(Box::new(BtcRules18::new(config.ensemble_min_votes))),
         "btc_15m_rules_461_min_votes_1" => {
             Ok(Box::new(BtcM15Rules461::new(config.ensemble_min_votes)))
@@ -60,6 +65,9 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
             Ok(Box::new(EthM15Rules663::new(config.ensemble_min_votes)))
         }
         "eth_1h_rules_17_min_votes_1" => Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes))),
+        "eth_1h_rules_210_min_votes_1" => {
+            Ok(Box::new(EthH1Rules210::new(config.ensemble_min_votes)))
+        }
         "five_year_70pct_btc_5m_rules_71_min_votes_1" => Ok(Box::new(
             FiveYear70PctBtcM5Rules71::new(config.ensemble_min_votes),
         )),
