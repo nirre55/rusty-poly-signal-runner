@@ -5,6 +5,9 @@
 Add a standalone script that scans every `logs/*/trades.csv` file in one
 repository and prints a global history summary.
 
+The script is named `trade_history_summary.sh` and lives at the repository
+root, next to `trade_summary.sh`.
+
 ## Input
 
 - Default input directory: `<repo>/logs`
