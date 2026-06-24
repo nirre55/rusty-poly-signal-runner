@@ -3,12 +3,16 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{error, info, warn};
 
 const BINANCE_WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const BINANCE_WS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
+const BINANCE_WS_DEFAULT_BASE: &str = "wss://stream.binance.com:9443/ws";
+const BINANCE_WS_PORT_443_BASE: &str = "wss://stream.binance.com:443/ws";
+const BINANCE_WS_MARKET_DATA_BASE: &str = "wss://data-stream.binance.vision:443/ws";
 
 // Les champs high, low, volume seront utilisés par les stratégies futures (EMA, ATR, etc.)
 #[allow(dead_code)]
@@ -131,19 +135,26 @@ pub async fn stream_candles(
     interval: &str,
     tx: mpsc::Sender<Candle>,
 ) -> Result<()> {
-    let ws_url = format!("{}/{symbol}@kline_{interval}", url);
-    info!("Connexion au WebSocket Binance: {}", ws_url);
+    let ws_bases = binance_ws_bases(url);
+    info!(
+        "Connexion au WebSocket Binance: {}",
+        ws_url(&ws_bases[0], symbol, interval)
+    );
 
     let mut reconnect_delay_secs = 5u64;
     let mut last_close_time_ms: i64 = 0;
 
     loop {
-        // P6 : timeout sur la tentative de connexion WebSocket
-        let connect_result =
-            tokio::time::timeout(BINANCE_WS_CONNECT_TIMEOUT, connect_async(&ws_url)).await;
+        let connect_result = connect_binance_ws(&ws_bases, symbol, interval).await;
 
         match connect_result {
-            Ok(Ok((ws_stream, _))) => {
+            Ok((ws_stream, connected_url)) => {
+                if connected_url != ws_url(&ws_bases[0], symbol, interval) {
+                    warn!(
+                        "[RECONNECT] WebSocket Binance connecte via endpoint fallback: {}",
+                        connected_url
+                    );
+                }
                 info!("Connecté au WebSocket Binance");
 
                 // Rattraper les bougies manquées pendant la déconnexion
@@ -308,10 +319,13 @@ pub async fn stream_candles(
                     }
                 }
             }
-            Ok(Err(e)) => {
-                error!("Échec connexion WebSocket Binance: {}", e);
+            Err(BinanceWsConnectError::Connect(e)) => {
+                error!(
+                    "Echec connexion WebSocket Binance: {}. Si le message contient 'failed to lookup address information', c'est une panne DNS/reseau temporaire; le bot retente avec backoff.",
+                    e
+                );
             }
-            Err(_) => {
+            Err(BinanceWsConnectError::Timeout) => {
                 error!("Timeout connexion WebSocket Binance (15s)");
             }
         }
@@ -325,8 +339,73 @@ pub async fn stream_candles(
     }
 }
 
-/// Après reconnexion WS, récupère les bougies fermées manquées via REST
-/// et les injecte dans le channel pour que la stratégie reste à jour.
+// Endpoints de secours pour les bougies publiques Binance.
+#[derive(Debug)]
+enum BinanceWsConnectError {
+    Connect(tokio_tungstenite::tungstenite::Error),
+    Timeout,
+}
+
+type BinanceWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+async fn connect_binance_ws(
+    bases: &[String],
+    symbol: &str,
+    interval: &str,
+) -> std::result::Result<(BinanceWsStream, String), BinanceWsConnectError> {
+    let mut last_error = None;
+    let mut saw_timeout = false;
+
+    for base in bases {
+        let url = ws_url(base, symbol, interval);
+        let connect_result =
+            tokio::time::timeout(BINANCE_WS_CONNECT_TIMEOUT, connect_async(&url)).await;
+
+        match connect_result {
+            Ok(Ok((ws_stream, _))) => return Ok((ws_stream, url)),
+            Ok(Err(e)) => {
+                warn!("Endpoint WebSocket Binance indisponible {}: {}", url, e);
+                last_error = Some(e);
+            }
+            Err(_) => {
+                warn!(
+                    "Timeout connexion WebSocket Binance sur endpoint {}, essai suivant...",
+                    url
+                );
+                saw_timeout = true;
+            }
+        }
+    }
+
+    match last_error {
+        Some(e) => Err(BinanceWsConnectError::Connect(e)),
+        None if saw_timeout => Err(BinanceWsConnectError::Timeout),
+        None => unreachable!("au moins un endpoint Binance doit etre configure"),
+    }
+}
+
+fn ws_url(base: &str, symbol: &str, interval: &str) -> String {
+    format!("{}/{symbol}@kline_{interval}", base.trim_end_matches('/'))
+}
+
+fn binance_ws_bases(primary: &str) -> Vec<String> {
+    let mut bases = Vec::new();
+    push_unique_ws_base(&mut bases, primary);
+    push_unique_ws_base(&mut bases, BINANCE_WS_DEFAULT_BASE);
+    push_unique_ws_base(&mut bases, BINANCE_WS_PORT_443_BASE);
+    push_unique_ws_base(&mut bases, BINANCE_WS_MARKET_DATA_BASE);
+    bases
+}
+
+fn push_unique_ws_base(bases: &mut Vec<String>, base: &str) {
+    let trimmed = base.trim().trim_end_matches('/');
+    if !trimmed.is_empty() && !bases.iter().any(|known| known == trimmed) {
+        bases.push(trimmed.to_string());
+    }
+}
+
+/// Apres reconnexion WS, recupere les bougies fermees manquees via REST
+/// et les injecte dans le channel pour que la strategie reste a jour.
 async fn catch_up_missed_candles(
     symbol: &str,
     interval: &str,
