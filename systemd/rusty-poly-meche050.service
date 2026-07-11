@@ -1,0 +1,19 @@
+[Unit]
+Description=Rusty Poly Mèche 0,50 portfolio runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=mehdi
+WorkingDirectory=/home/mehdi/rusty-poly-signal-runner-four-strategies
+Environment=PATH=/home/mehdi/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RUST_LOG=info
+ExecStart=/bin/bash /home/mehdi/rusty-poly-signal-runner-four-strategies/start_meche050.sh start
+ExecStop=/bin/bash /home/mehdi/rusty-poly-signal-runner-four-strategies/start_meche050.sh stop
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

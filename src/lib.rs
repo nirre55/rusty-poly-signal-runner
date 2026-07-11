@@ -4,6 +4,8 @@ pub mod interval;
 pub mod logger;
 pub mod money;
 pub mod polymarket;
+pub mod portfolio;
+pub mod portfolio_runtime;
 pub mod runtime_metrics;
 pub mod strategies;
 pub mod strategy;
