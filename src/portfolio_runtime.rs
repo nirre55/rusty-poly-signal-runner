@@ -149,6 +149,8 @@ pub struct PortfolioOrder {
     pub allocation_usdc: f64,
     pub amount_usdc: f64,
     pub minimum_usdc: f64,
+    #[serde(default)]
+    pub minimum_overrides_window: bool,
     pub target_close_time_ms: i64,
     pub created_at: DateTime<Utc>,
     pub order_id: Option<String>,
@@ -427,6 +429,7 @@ mod tests {
             allocation_usdc: 12.0,
             amount_usdc: 12.0,
             minimum_usdc: 2.50,
+            minimum_overrides_window: false,
             target_close_time_ms: 1,
             created_at: Utc::now(),
             order_id: None,

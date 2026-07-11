@@ -143,6 +143,7 @@ pub struct SizedOrder {
 pub struct SizingRule {
     pub window_budget_pct: f64,
     pub signal_cap_pct: f64,
+    pub allow_minimum_above_window: bool,
 }
 
 impl SizingRule {
@@ -174,10 +175,16 @@ pub enum SizingDecision {
         per_signal_usdc: f64,
         orders: Vec<SizedOrder>,
         total_usdc: f64,
+        minimum_overrides_window: bool,
+        skipped_insufficient_capital_orders: usize,
     },
     SkipMinimumsExceedBudget {
         window_budget_usdc: f64,
         total_usdc: f64,
+    },
+    SkipInsufficientCapital {
+        capital_usdc: f64,
+        minimum_usdc: f64,
     },
 }
 
@@ -196,6 +203,10 @@ impl PortfolioSettings {
         let sizing = SizingRule {
             window_budget_pct: parse_env_f64("PORTFOLIO_WINDOW_BUDGET_PCT", 3.5)?,
             signal_cap_pct: parse_env_f64("PORTFOLIO_SIGNAL_CAP_PCT", 1.2)?,
+            allow_minimum_above_window: parse_env_bool(
+                "PORTFOLIO_ALLOW_MINIMUM_ABOVE_WINDOW",
+                false,
+            )?,
         };
         sizing.validate()?;
 
@@ -283,10 +294,22 @@ pub fn group_signals(signals: &[PortfolioSignal]) -> Vec<OrderGroup> {
             });
         }
     }
+    groups.sort_by(|left, right| {
+        left.market.cmp(&right.market).then_with(|| {
+            prediction_priority(&left.prediction).cmp(&prediction_priority(&right.prediction))
+        })
+    });
     groups
 }
 
-/// Applies W/f sizing to resolved market groups without ever exceeding W.
+fn prediction_priority(prediction: &Prediction) -> u8 {
+    match prediction {
+        Prediction::Up => 0,
+        Prediction::Down => 1,
+    }
+}
+
+/// Applies W/f sizing to resolved market groups.
 ///
 /// `minimums_usdc` is expected to contain one price-fixed minimum per group in the same order.
 pub fn size_window(
@@ -327,6 +350,7 @@ pub fn size_window(
             * (rule.signal_cap_pct / 100.0)
                 .min(rule.window_budget_pct / 100.0 / signal_count as f64),
     );
+    let capital_cents = floor_to_cents(capital_usdc);
     let mut total_cents = 0_i64;
     let mut orders = Vec::with_capacity(groups.len());
 
@@ -346,11 +370,36 @@ pub fn size_window(
         });
     }
 
-    if total_cents > window_budget_cents {
+    if total_cents > window_budget_cents && !rule.allow_minimum_above_window {
         return Ok(SizingDecision::SkipMinimumsExceedBudget {
             window_budget_usdc: cents_to_usdc(window_budget_cents),
             total_usdc: cents_to_usdc(total_cents),
         });
+    }
+
+    let minimum_overrides_window = total_cents > window_budget_cents;
+    let mut skipped_insufficient_capital_orders = 0;
+    if minimum_overrides_window {
+        let mut remaining_cents = capital_cents;
+        orders.retain(|order| {
+            let amount_cents = floor_to_cents(order.amount_usdc);
+            if amount_cents <= remaining_cents {
+                remaining_cents -= amount_cents;
+                true
+            } else {
+                skipped_insufficient_capital_orders += 1;
+                false
+            }
+        });
+        total_cents = capital_cents - remaining_cents;
+
+        if orders.is_empty() {
+            let minimum_usdc = minimums_usdc.iter().copied().fold(f64::INFINITY, f64::min);
+            return Ok(SizingDecision::SkipInsufficientCapital {
+                capital_usdc: cents_to_usdc(capital_cents),
+                minimum_usdc,
+            });
+        }
     }
 
     Ok(SizingDecision::Submit {
@@ -359,6 +408,8 @@ pub fn size_window(
         per_signal_usdc: cents_to_usdc(per_signal_cents),
         orders,
         total_usdc: cents_to_usdc(total_cents),
+        minimum_overrides_window,
+        skipped_insufficient_capital_orders,
     })
 }
 
@@ -390,6 +441,13 @@ fn parse_env_u64(name: &str, default: u64) -> Result<u64> {
             .trim()
             .parse::<u64>()
             .with_context(|| format!("{} doit être un entier", name)),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_bool(name: &str, default: bool) -> Result<bool> {
+    match env::var(name) {
+        Ok(value) => parse_bool(&value, name),
         Err(_) => Ok(default),
     }
 }
@@ -440,6 +498,7 @@ mod tests {
         SizingRule {
             window_budget_pct: 3.5,
             signal_cap_pct: 1.2,
+            allow_minimum_above_window: false,
         }
     }
 
@@ -539,6 +598,82 @@ mod tests {
             } => {
                 assert_eq!(window_budget_usdc, 3.50);
                 assert_eq!(total_usdc, 5.0);
+            }
+            other => panic!("unexpected sizing decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn minimum_override_submits_five_shares_when_window_is_smaller() {
+        let groups = group_signals(&[signal(PortfolioStrategy::TrioVote2, MarketSlot::Eth5m)]);
+        let mut override_rule = rule();
+        override_rule.allow_minimum_above_window = true;
+
+        let decision = size_window(override_rule, 15.15, groups, &[2.50]).expect("valid sizing");
+
+        match decision {
+            SizingDecision::Submit {
+                orders,
+                total_usdc,
+                minimum_overrides_window,
+                skipped_insufficient_capital_orders,
+                ..
+            } => {
+                assert_eq!(orders.len(), 1);
+                assert_eq!(orders[0].amount_usdc, 2.50);
+                assert_eq!(total_usdc, 2.50);
+                assert!(minimum_overrides_window);
+                assert_eq!(skipped_insufficient_capital_orders, 0);
+            }
+            other => panic!("unexpected sizing decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn minimum_override_opens_groups_in_market_priority_until_capital_runs_out() {
+        let groups = group_signals(&[
+            signal(PortfolioStrategy::TrioVote2, MarketSlot::Eth5m),
+            signal(PortfolioStrategy::TrioVote2, MarketSlot::Btc5m),
+        ]);
+        let mut override_rule = rule();
+        override_rule.allow_minimum_above_window = true;
+
+        let decision =
+            size_window(override_rule, 4.99, groups, &[2.50, 2.50]).expect("valid sizing");
+
+        match decision {
+            SizingDecision::Submit {
+                orders,
+                total_usdc,
+                minimum_overrides_window,
+                skipped_insufficient_capital_orders,
+                ..
+            } => {
+                assert_eq!(orders.len(), 1);
+                assert_eq!(orders[0].group.market, MarketSlot::Btc5m);
+                assert_eq!(total_usdc, 2.50);
+                assert!(minimum_overrides_window);
+                assert_eq!(skipped_insufficient_capital_orders, 1);
+            }
+            other => panic!("unexpected sizing decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn minimum_override_skips_window_when_capital_cannot_cover_one_minimum() {
+        let groups = group_signals(&[signal(PortfolioStrategy::TrioVote2, MarketSlot::Eth5m)]);
+        let mut override_rule = rule();
+        override_rule.allow_minimum_above_window = true;
+
+        let decision = size_window(override_rule, 2.49, groups, &[2.50]).expect("valid sizing");
+
+        match decision {
+            SizingDecision::SkipInsufficientCapital {
+                capital_usdc,
+                minimum_usdc,
+            } => {
+                assert_eq!(capital_usdc, 2.49);
+                assert_eq!(minimum_usdc, 2.50);
             }
             other => panic!("unexpected sizing decision: {other:?}"),
         }

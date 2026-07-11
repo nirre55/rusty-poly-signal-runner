@@ -124,10 +124,11 @@ async fn main() -> Result<()> {
     let feed_configs = build_feed_configs(&config);
 
     info!(
-        "Mèche 0,50 | mode={:?} | W={:.2}% | f={:.2}% | sync={}ms | active_orders={}",
+        "Mèche 0,50 | mode={:?} | W={:.2}% | f={:.2}% | min_override={} | sync={}ms | active_orders={}",
         config.execution_mode,
         settings.sizing.window_budget_pct,
         settings.sizing.signal_cap_pct,
+        settings.sizing.allow_minimum_above_window,
         settings.sync_grace.as_millis(),
         book.orders()
             .iter()
@@ -406,12 +407,62 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             );
             Ok(())
         }
+        SizingDecision::SkipInsufficientCapital {
+            capital_usdc,
+            minimum_usdc,
+        } => {
+            warn!(
+                "Fenetre ignoree: capital disponible {:.2}$ < minimum {:.2}$",
+                capital_usdc, minimum_usdc
+            );
+            log_event(
+                &context.event_path,
+                "WINDOW_SKIPPED_INSUFFICIENT_CAPITAL",
+                json!({
+                    "entry_time_ms": batch.entry_time_ms,
+                    "capital_usdc": capital_usdc,
+                    "minimum_usdc": minimum_usdc,
+                }),
+            );
+            Ok(())
+        }
         SizingDecision::Submit {
             window_budget_usdc,
             orders,
             total_usdc,
+            minimum_overrides_window,
+            skipped_insufficient_capital_orders,
             ..
         } => {
+            if minimum_overrides_window {
+                warn!(
+                    "Minimum 5 shares prioritaire: total {:.2}$ > budget W {:.2}$",
+                    total_usdc, window_budget_usdc
+                );
+                log_event(
+                    &context.event_path,
+                    "WINDOW_MINIMUM_OVERRIDE",
+                    json!({
+                        "entry_time_ms": batch.entry_time_ms,
+                        "window_budget_usdc": window_budget_usdc,
+                        "total_usdc": total_usdc,
+                    }),
+                );
+            }
+            if skipped_insufficient_capital_orders > 0 {
+                warn!(
+                    "{} order(s) skipped: insufficient CLOB capital after minimums",
+                    skipped_insufficient_capital_orders
+                );
+                log_event(
+                    &context.event_path,
+                    "WINDOW_PARTIAL_INSUFFICIENT_CAPITAL",
+                    json!({
+                        "entry_time_ms": batch.entry_time_ms,
+                        "skipped_orders": skipped_insufficient_capital_orders,
+                    }),
+                );
+            }
             info!(
                 "Fenêtre prête | entry={} | signaux={} | ordres={} | total={:.2}$ / W={:.2}$",
                 batch.entry_time_ms,
@@ -433,6 +484,7 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     batch.entry_time_ms,
                     capital_usdc,
                     window_budget_usdc,
+                    minimum_overrides_window,
                     &sized,
                     resolved,
                 )
@@ -448,6 +500,7 @@ async fn submit_combined_order(
     entry_time_ms: i64,
     capital_usdc: f64,
     window_budget_usdc: f64,
+    minimum_overrides_window: bool,
     sized: &rusty_poly_signal_runner::portfolio::SizedOrder,
     resolved: &ResolvedGroup,
 ) -> Result<()> {
@@ -476,6 +529,7 @@ async fn submit_combined_order(
         allocation_usdc: sized.allocation_usdc,
         amount_usdc: sized.amount_usdc,
         minimum_usdc: sized.minimum_usdc,
+        minimum_overrides_window,
         target_close_time_ms: entry_time_ms + sized.group.market.interval_millis() - 1,
         created_at: Utc::now(),
         order_id: None,
