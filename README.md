@@ -21,6 +21,10 @@ Le projet supporte plusieurs stratégies configurables, le dry-run, les ordres r
 
 | Nom | Marché typique | Description |
 |---|---|---|
+| `boll_fade` | BTC/ETH 5m/15m | Reversal d'une cloture de capitulation hors des bandes de Bollinger 20. |
+| `streak_rsi` | BTC/ETH 5m/15m | Fade apres 3 bougies de meme couleur, RSI7 extreme, ATR et body filtres. |
+| `trio_vote2` | BTC/ETH 5m/15m | Composite : au moins 2 votes concordants parmi Bollinger, streak/RSI et Donchian/z-score. |
+| `reversal_pro` | BTC/ETH 5m/15m | Fade selectif : streak, RSI7/z24 extremes, range ATR et corps plein. |
 | `three_candle_rsi7_reversal` | BTC 5m | Reversal après 3 bougies de même couleur + RSI7 + filtres range/body. |
 | `btc_5m_rules_90_min_votes_1` | BTC 5m | Ensemble de 90 micro-règles. |
 | `btc_5m_rules_23_min_votes_1` | BTC 5m | Ensemble combine de 23 micro-strategies, `min_votes=1`. |
@@ -76,6 +80,10 @@ Variables principales :
 | `ENSEMBLE_MIN_VOTES` | Nombre minimal de votes pour les stratégies ensemble. | `1` |
 | `LIMIT_PRICE_REFERENCE` | Prix de reference des ordres limite: `best_ask` ou `best_bid`. | `best_ask` |
 | `LIMIT_PRICE_OFFSET` | Offset signe ajoute au prix de reference en mode `limit`, ex. `0.01`, `0`, `-0.01`. | `0.01` |
+| `PORTFOLIO_WINDOW_BUDGET_PCT` | Budget total partage par fenetre du runner Meche. | `3.5` |
+| `PORTFOLIO_SIGNAL_CAP_PCT` | Plafond de sizing par signal du runner Meche. | `1.2` |
+| `PORTFOLIO_SYNC_GRACE_MS` | Delai maximal d'attente des flux Binance attendus pour une fenetre Meche. | `1250` |
+| `PORTFOLIO_ENABLED_CONFIG` | Grille persistante des 16 sorties strategie/marche. | `configs/meche050_enabled.env` |
 | `LIMIT_PRICE_FIXED` | Prix limite fixe optionnel, ex. `0.50`. Si defini, ignore reference, offset et high guard. | Aucun |
 | `LIMIT_PRICE_HIGH_GUARD_ENABLED` | Active le garde-fou des prix limite eleves. Si actif et que le prix calcule depasse le seuil, le bot force le prix configure. | `false` |
 | `LIMIT_PRICE_HIGH_GUARD_THRESHOLD` | Seuil du garde-fou, ex. `0.60`. Le garde-fou s'applique seulement si le prix calcule est strictement superieur au seuil. | `0.60` |
@@ -143,6 +151,26 @@ Sur Ubuntu/server :
 ./start_all.sh stop
 ```
 
+### Portefeuille Meche 0,50
+
+Le portefeuille Meche utilise un seul processus pour ses 16 sorties logiques
+(`boll_fade`, `streak_rsi`, `trio_vote2`, `reversal_pro` x BTC/ETH x 5m/15m).
+Il agrege les signaux par ouverture de fenetre, applique W=3,5 % et f=1,2 %
+sur le solde commun, puis fusionne les signaux identiques dans un ordre limite a 0,50.
+Ne lancez pas en parallele les anciens bots sur le meme compte : ils ne partagent pas ce plafond.
+
+```bash
+chmod +x start_meche050.sh
+./start_meche050.sh start
+./start_meche050.sh status
+./start_meche050.sh strategy disable boll_fade
+./start_meche050.sh strategy enable boll_fade btc_5m
+./start_meche050.sh strategy only trio_vote2 eth_15m
+./start_meche050.sh strategy all
+```
+
+Chaque changement d'activation reecrit atomiquement `configs/meche050_enabled.env` et redemarre le runner unique. Les ordres deja soumis restent persistes dans `logs/meche050/portfolio_state.json` pour leur suivi.
+
 Installer une nouvelle instance systemd depuis le dossier clone courant :
 
 ```bash
@@ -205,6 +233,8 @@ Fichiers produits :
 | `trades.csv` | Historique des signaux, ordres, latences et outcomes. |
 | `pending_orders.json` | Ordres ouverts à suivre après restart. |
 | `money_state.json` | État du money management. |
+| `portfolio_state.json` | Ordres combines Meche persistes, incluant les soumissions en cours. |
+| `portfolio_events.jsonl` | Journal structure des fenetres, tailles, ordres et reglements Meche. |
 
 Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
 

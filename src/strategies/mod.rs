@@ -17,4 +17,5 @@ pub mod five_year_70pct_eth_15m_rules_181_min_votes_1;
 pub mod five_year_70pct_eth_1h_rules_632_min_votes_1;
 pub mod five_year_70pct_eth_5m_rules_75_min_votes_1;
 mod indicators;
+pub mod meche;
 pub mod three_candle_rsi7_reversal;

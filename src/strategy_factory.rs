@@ -19,6 +19,7 @@ use crate::strategies::five_year_70pct_btc_5m_rules_71_min_votes_1::FiveYear70Pc
 use crate::strategies::five_year_70pct_eth_15m_rules_181_min_votes_1::FiveYear70PctEthM15Rules181;
 use crate::strategies::five_year_70pct_eth_1h_rules_632_min_votes_1::FiveYear70PctEthH1Rules632;
 use crate::strategies::five_year_70pct_eth_5m_rules_75_min_votes_1::FiveYear70PctEthM5Rules75;
+use crate::strategies::meche::{BollFade, ReversalPro, StreakRsi, TrioVote2};
 use crate::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
 use crate::strategy::Strategy;
 
@@ -42,6 +43,10 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "five_year_70pct_eth_5m_rules_75_min_votes_1",
     "five_year_70pct_eth_15m_rules_181_min_votes_1",
     "five_year_70pct_eth_1h_rules_632_min_votes_1",
+    "boll_fade",
+    "streak_rsi",
+    "trio_vote2",
+    "reversal_pro",
 ];
 
 pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
@@ -86,6 +91,10 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
         "five_year_70pct_eth_1h_rules_632_min_votes_1" => Ok(Box::new(
             FiveYear70PctEthH1Rules632::new(config.ensemble_min_votes),
         )),
+        "boll_fade" => Ok(Box::new(BollFade::new())),
+        "streak_rsi" => Ok(Box::new(StreakRsi::new())),
+        "trio_vote2" => Ok(Box::new(TrioVote2::new())),
+        "reversal_pro" => Ok(Box::new(ReversalPro::new())),
         other => anyhow::bail!(
             "Stratégie '{}' inconnue. Stratégies disponibles: {}",
             other,
