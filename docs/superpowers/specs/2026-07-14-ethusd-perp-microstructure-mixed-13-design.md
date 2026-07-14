@@ -66,7 +66,7 @@ observation posterieure. Les variables reproduisent les calculs Python figes :
 - open interest ETH : variations de quantite et de valeur sur les horizons
   6, 12 et 24.
 
-Les 40 variables citees dans les 25 regles seront representees par un enum
+Les 39 variables uniques citees dans les 25 regles seront representees par un enum
 type. Cette representation interdit les fautes de nom et permet de rendre les
 regles et leurs seuils directement auditables.
 
@@ -134,4 +134,3 @@ Le succes de compilation et de parite demontre l'integration et la
 reproduction des fixtures. Il ne valide pas un avantage de trading en reel ;
 la configuration restera donc en `dry_run` jusqu'a la validation forward
 operationnelle demandee par le registre frozen.
-
