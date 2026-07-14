@@ -12,6 +12,7 @@ use crate::logger::{
     log_candle_close, log_order_ack, log_order_sent, log_signal_detected, CandleCloseLog,
     PendingBuyTradeRecord, TradeLogger, TradeRecord,
 };
+use crate::microstructure::MicrostructureSnapshot;
 use crate::money::MoneyManager;
 use crate::polymarket::{MarketInfo, OrderResult, PolymarketClient};
 use crate::runtime_metrics::RuntimeMetrics;
@@ -208,8 +209,33 @@ pub async fn process_closed_candle(
     state: &RuntimeState,
     candle: &Candle,
 ) -> ClosedCandleAction {
-    let signal_received_at = Utc::now();
     let signal = strategy.on_closed_candle(candle);
+    process_signal_for_candle(config, interval_duration, strategy, state, candle, signal).await
+}
+
+/// Process a causally complete multi-source snapshot through the normal
+/// Polymarket execution path without feeding it back into on_closed_candle.
+pub async fn process_microstructure_snapshot(
+    config: &Config,
+    interval_duration: Duration,
+    strategy: &mut dyn Strategy,
+    state: &RuntimeState,
+    snapshot: &MicrostructureSnapshot,
+) -> ClosedCandleAction {
+    let candle = snapshot.candle();
+    let signal = strategy.on_microstructure_snapshot(snapshot);
+    process_signal_for_candle(config, interval_duration, strategy, state, candle, signal).await
+}
+
+async fn process_signal_for_candle(
+    config: &Config,
+    interval_duration: Duration,
+    strategy: &mut dyn Strategy,
+    state: &RuntimeState,
+    candle: &Candle,
+    signal: Option<Signal>,
+) -> ClosedCandleAction {
+    let signal_received_at = Utc::now();
 
     let color = if candle.is_green() { "VERT" } else { "ROUGE" };
     let candle_log_extras = strategy.candle_log_extras();

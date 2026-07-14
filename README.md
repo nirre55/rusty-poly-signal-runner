@@ -287,6 +287,21 @@ cargo test --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
+## ETHUSD_PERP microstructure mixed_13
+
+`ethusd_perp_coinm_15m_microstructure_mixed_13` est une strategie ETH 15m
+figee basee sur les klines COIN-M ETHUSD_PERP, les futures USD-M BTC/ETH, les
+prix mark/index et l'open interest ETH. Elle utilise des snapshots Binance
+causaux : une donnee absente, retardee ou posterieure a la cloture invalide la
+decision plutot que d'etre remplacee.
+
+Elle est fournie uniquement en `dry_run` et n'est pas lancee par `start_all`.
+
+```powershell
+$env:STRATEGY_CONFIG = 'configs/ethusd_perp_coinm_15m_microstructure_mixed_13.env'
+cargo run --locked
+```
+
 ## Ajouter une stratégie
 
 1. Créer un fichier dans `src/strategies/`.

@@ -13,6 +13,7 @@ use crate::strategies::eth_1h_rules_17_min_votes_1::EthH1Rules17;
 use crate::strategies::eth_1h_rules_210_min_votes_1::EthH1Rules210;
 use crate::strategies::eth_5m_rules_25_min_votes_1::EthRules25;
 use crate::strategies::eth_5m_rules_542_min_votes_1::EthRules542;
+use crate::strategies::ethusd_perp_coinm_15m_microstructure_mixed_13::EthUsdPerpMicrostructureMixed13;
 use crate::strategies::five_year_70pct_btc_15m_rules_176_min_votes_1::FiveYear70PctBtcM15Rules176;
 use crate::strategies::five_year_70pct_btc_1h_rules_586_min_votes_1::FiveYear70PctBtcH1Rules586;
 use crate::strategies::five_year_70pct_btc_5m_rules_71_min_votes_1::FiveYear70PctBtcM5Rules71;
@@ -35,6 +36,7 @@ const KNOWN_STRATEGIES: &[&str] = &[
     "eth_5m_rules_542_min_votes_1",
     "eth_15m_rules_24_min_votes_1",
     "eth_15m_rules_663_min_votes_1",
+    "ethusd_perp_coinm_15m_microstructure_mixed_13",
     "eth_1h_rules_17_min_votes_1",
     "eth_1h_rules_210_min_votes_1",
     "five_year_70pct_btc_5m_rules_71_min_votes_1",
@@ -68,6 +70,9 @@ pub fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
         "eth_15m_rules_24_min_votes_1" => Ok(Box::new(EthRules24::new(config.ensemble_min_votes))),
         "eth_15m_rules_663_min_votes_1" => {
             Ok(Box::new(EthM15Rules663::new(config.ensemble_min_votes)))
+        }
+        "ethusd_perp_coinm_15m_microstructure_mixed_13" => {
+            Ok(Box::new(EthUsdPerpMicrostructureMixed13::new()))
         }
         "eth_1h_rules_17_min_votes_1" => Ok(Box::new(EthH1Rules17::new(config.ensemble_min_votes))),
         "eth_1h_rules_210_min_votes_1" => {

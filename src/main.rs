@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -8,13 +8,15 @@ use rusty_poly_signal_runner::binance::{self, Candle};
 use rusty_poly_signal_runner::config::{Config, ExecutionMode};
 use rusty_poly_signal_runner::interval::parse_interval_duration;
 use rusty_poly_signal_runner::logger::TradeLogger;
+use rusty_poly_signal_runner::microstructure::EthUsdPerpMicrostructureCollector;
 use rusty_poly_signal_runner::money::MoneyManager;
 use rusty_poly_signal_runner::polymarket::PolymarketClient;
 use rusty_poly_signal_runner::runtime_metrics::RuntimeMetrics;
+use rusty_poly_signal_runner::strategy::Strategy;
 use rusty_poly_signal_runner::strategy_factory::create_strategy;
 use rusty_poly_signal_runner::tracker::{PolymarketReadClient, PositionTracker};
 use rusty_poly_signal_runner::trading_runtime::{
-    process_closed_candle, PolymarketTradingClient, RuntimeState,
+    process_closed_candle, process_microstructure_snapshot, PolymarketTradingClient, RuntimeState,
 };
 
 #[tokio::main]
@@ -119,6 +121,16 @@ async fn main() -> Result<()> {
         metrics: metrics.clone(),
     };
 
+    if active_strategy.requires_microstructure() {
+        return run_microstructure_strategy(
+            &config,
+            interval_duration,
+            active_strategy.as_mut(),
+            &runtime_state,
+        )
+        .await;
+    }
+
     match binance::fetch_historical_candles(&config.symbol, &config.interval, 120).await {
         Ok(candles) => {
             let now_ms = Utc::now().timestamp_millis();
@@ -185,4 +197,79 @@ async fn main() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         poly_client.warm_up().await;
     }
+}
+
+async fn run_microstructure_strategy(
+    config: &Config,
+    interval_duration: ChronoDuration,
+    strategy: &mut dyn Strategy,
+    runtime_state: &RuntimeState,
+) -> Result<()> {
+    const PRECOMMIT_WINDOW: ChronoDuration = ChronoDuration::seconds(30);
+    let collector = EthUsdPerpMicrostructureCollector::new()?;
+    let mut last_seen_close: Option<DateTime<Utc>> = None;
+
+    info!(
+        "Demarrage collecteur microstructure ETHUSD_PERP 15m | strategie={} | precommit_max=30s",
+        strategy.name()
+    );
+
+    loop {
+        match collector.fetch_snapshot().await {
+            Ok(snapshot) => {
+                let close_time = snapshot.candle().close_time;
+                if last_seen_close == Some(close_time) {
+                    tokio::time::sleep(until_next_microstructure_refresh()).await;
+                    continue;
+                }
+
+                last_seen_close = Some(close_time);
+                let age = Utc::now().signed_duration_since(close_time);
+                if age > PRECOMMIT_WINDOW {
+                    warn!(
+                        "[MICROSTRUCTURE] snapshot trop ancien, signal ignore | close={} age_ms={}",
+                        close_time,
+                        age.num_milliseconds()
+                    );
+                    tokio::time::sleep(until_next_microstructure_refresh()).await;
+                    continue;
+                }
+                if age < ChronoDuration::zero() {
+                    warn!(
+                        "[MICROSTRUCTURE] horloge locale avant le snapshot, nouvelle tentative | close={}",
+                        close_time
+                    );
+                    last_seen_close = None;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                process_microstructure_snapshot(
+                    config,
+                    interval_duration,
+                    strategy,
+                    runtime_state,
+                    &snapshot,
+                )
+                .await;
+                tokio::time::sleep(until_next_microstructure_refresh()).await;
+            }
+            Err(error) => {
+                warn!(
+                    "[MICROSTRUCTURE] snapshot indisponible, aucun signal emis: {}",
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+fn until_next_microstructure_refresh() -> std::time::Duration {
+    const PERIOD_MS: i64 = 15 * 60 * 1000;
+    const GRACE_MS: i64 = 2_000;
+    let now_ms = Utc::now().timestamp_millis();
+    let next_boundary_ms = (now_ms.div_euclid(PERIOD_MS) + 1) * PERIOD_MS + GRACE_MS;
+    let wait_ms = (next_boundary_ms - now_ms).max(1) as u64;
+    std::time::Duration::from_millis(wait_ms)
 }
