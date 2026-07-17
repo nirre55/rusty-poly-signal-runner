@@ -103,6 +103,12 @@ pub struct MicrostructureAuditRecord {
     pub record_hash: String,
 }
 
+#[derive(Debug)]
+struct StoredAuditRecord {
+    record: MicrostructureAuditRecord,
+    hash_payload: String,
+}
+
 #[derive(Serialize)]
 struct HashPayload<'a> {
     schema_version: u8,
@@ -203,7 +209,7 @@ impl MicrostructureAuditRecord {
             previous_hash: &self.previous_hash,
         };
         let bytes = serde_json::to_vec(&payload).context("serialisation hash audit")?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(hash_bytes(&bytes))
     }
 }
 
@@ -217,7 +223,7 @@ impl MicrostructureAuditLogger {
     pub fn new(logs_dir: &str) -> Result<Self> {
         fs::create_dir_all(logs_dir)?;
         let path = PathBuf::from(logs_dir).join(AUDIT_FILE_NAME);
-        let existing = read_audit_records(&path)?;
+        let existing = read_stored_audit_records(&path)?;
         let integrity_errors = verify_hash_chain(&existing);
         if !integrity_errors.is_empty() {
             bail!(
@@ -240,7 +246,7 @@ impl MicrostructureAuditLogger {
             .lock
             .lock()
             .map_err(|error| anyhow!("audit lock poisoned: {error}"))?;
-        let records = read_audit_records(&self.path)?;
+        let records = read_stored_audit_records(&self.path)?;
         let integrity_errors = verify_hash_chain(&records);
         if !integrity_errors.is_empty() {
             bail!(
@@ -248,7 +254,7 @@ impl MicrostructureAuditLogger {
                 integrity_errors.join("; ")
             );
         }
-        record.previous_hash = records.last().map(|last| last.record_hash.clone());
+        record.previous_hash = records.last().map(|last| last.record.record_hash.clone());
         record.record_hash = record.calculate_hash()?;
         let serialized = serde_json::to_string(record).context("serialisation JSONL audit")?;
         let mut file = OpenOptions::new()
@@ -264,6 +270,13 @@ impl MicrostructureAuditLogger {
 }
 
 pub fn read_audit_records(path: &Path) -> Result<Vec<MicrostructureAuditRecord>> {
+    Ok(read_stored_audit_records(path)?
+        .into_iter()
+        .map(|stored| stored.record)
+        .collect())
+}
+
+fn read_stored_audit_records(path: &Path) -> Result<Vec<StoredAuditRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -274,8 +287,14 @@ pub fn read_audit_records(path: &Path) -> Result<Vec<MicrostructureAuditRecord>>
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| {
-            serde_json::from_str(line)
-                .with_context(|| format!("JSON audit invalide ligne {}", index + 1))
+            let record: MicrostructureAuditRecord = serde_json::from_str(line)
+                .with_context(|| format!("JSON audit invalide ligne {}", index + 1))?;
+            let hash_payload = hash_payload_from_raw_line(line, &record.record_hash)
+                .with_context(|| format!("hash audit invalide ligne {}", index + 1))?;
+            Ok(StoredAuditRecord {
+                record,
+                hash_payload,
+            })
         })
         .collect()
 }
@@ -298,45 +317,61 @@ impl AuditVerificationReport {
 }
 
 pub fn verify_audit_file(path: &Path) -> Result<AuditVerificationReport> {
-    let records = read_audit_records(path)?;
+    let records = read_stored_audit_records(path)?;
     let mut report = AuditVerificationReport {
         total_records: records.len(),
         failures: verify_hash_chain(&records),
         ..AuditVerificationReport::default()
     };
 
-    for (index, record) in records.iter().enumerate() {
+    for (index, stored) in records.iter().enumerate() {
         let line = index + 1;
-        match record.status {
+        match stored.record.status {
             AuditRecordStatus::CollectionError => {
                 report.collection_errors += 1;
-                validate_collection_error(record, line, &mut report.failures);
+                validate_collection_error(&stored.record, line, &mut report.failures);
             }
             AuditRecordStatus::Decision => {
                 report.decisions += 1;
-                validate_decision_record(record, line, &mut report);
+                validate_decision_record(&stored.record, line, &mut report);
             }
         }
     }
     Ok(report)
 }
 
-fn verify_hash_chain(records: &[MicrostructureAuditRecord]) -> Vec<String> {
+fn verify_hash_chain(records: &[StoredAuditRecord]) -> Vec<String> {
     let mut failures = Vec::new();
     let mut previous_hash = None;
-    for (index, record) in records.iter().enumerate() {
+    for (index, stored) in records.iter().enumerate() {
         let line = index + 1;
+        let record = &stored.record;
         if record.previous_hash != previous_hash {
             failures.push(format!("ligne {line}: previous_hash invalide"));
         }
-        match record.calculate_hash() {
-            Ok(expected) if expected == record.record_hash => {}
-            Ok(_) => failures.push(format!("ligne {line}: record_hash invalide")),
-            Err(error) => failures.push(format!("ligne {line}: hash non calculable: {error}")),
+        if hash_bytes(stored.hash_payload.as_bytes()) != record.record_hash {
+            failures.push(format!("ligne {line}: record_hash invalide"));
         }
         previous_hash = Some(record.record_hash.clone());
     }
     failures
+}
+
+fn hash_payload_from_raw_line(line: &str, record_hash: &str) -> Result<String> {
+    let suffix = format!(r#","record_hash":"{record_hash}"}}"#);
+    let prefix = line
+        .strip_suffix(&suffix)
+        .ok_or_else(|| anyhow!("record_hash doit etre le dernier champ JSON"))?;
+    if !prefix.starts_with('{') {
+        bail!("record audit JSON incomplet");
+    }
+    let mut payload = prefix.to_string();
+    payload.push('}');
+    Ok(payload)
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn validate_collection_error(
@@ -571,6 +606,40 @@ mod tests {
             .failures
             .iter()
             .any(|failure| failure.contains("source future")));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn verifies_the_original_json_bytes_instead_of_reserializing_numbers() {
+        let dir = temp_dir("raw_bytes");
+        let logger = MicrostructureAuditLogger::new(dir.to_str().unwrap()).unwrap();
+        let source_time = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut decision = decision_record(source_time);
+        logger.append(&mut decision).unwrap();
+
+        let path = logger.path().to_path_buf();
+        let original = fs::read_to_string(&path).unwrap();
+        let (prefix, _) = original
+            .trim_end()
+            .rsplit_once(",\"record_hash\":")
+            .unwrap();
+        let reformatted_prefix = prefix.replacen(
+            "\"signal_breakout_high_20\":0.0",
+            "\"signal_breakout_high_20\":0.00",
+            1,
+        );
+        assert_ne!(prefix, reformatted_prefix);
+        let mut payload = reformatted_prefix.clone();
+        payload.push('}');
+        let record_hash = hash_bytes(payload.as_bytes());
+        fs::write(
+            &path,
+            format!("{reformatted_prefix},\"record_hash\":\"{record_hash}\"}}\n"),
+        )
+        .unwrap();
+
+        let report = verify_audit_file(&path).unwrap();
+        assert!(report.is_valid(), "{:?}", report.failures);
         fs::remove_dir_all(dir).ok();
     }
 
