@@ -1,0 +1,265 @@
+use anyhow::{anyhow, Result};
+use chrono::{Duration, TimeZone, Utc};
+use rusty_poly_signal_runner::binance::Candle;
+use rusty_poly_signal_runner::config::{
+    Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
+    PolymarketSlugFormat,
+};
+use rusty_poly_signal_runner::logger::TradeLogger;
+use rusty_poly_signal_runner::microstructure::{Feature, MicrostructureSnapshot};
+use rusty_poly_signal_runner::money::MoneyManager;
+use rusty_poly_signal_runner::polymarket::{MarketInfo, OrderResult};
+use rusty_poly_signal_runner::runtime_metrics::RuntimeMetrics;
+use rusty_poly_signal_runner::strategy::{
+    MicrostructureDecisionSummary, Prediction, Signal, Strategy,
+};
+use rusty_poly_signal_runner::tracker::{PolymarketReadClient, PositionTracker};
+use rusty_poly_signal_runner::trading_runtime::{
+    process_microstructure_snapshot, ClosedCandleAction, PolymarketTradingClient, RuntimeState,
+};
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+fn temp_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "rusty_poly_signal_runner_microstructure_audit_runtime_{}",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+fn config(logs_dir: &str) -> Config {
+    Config {
+        binance_ws_url: String::new(),
+        symbol: "ethusdt".to_string(),
+        interval: "15m".to_string(),
+        execution_mode: ExecutionMode::DryRun,
+        trade_amount_usdc: 10.0,
+        polymarket_api_key: String::new(),
+        polymarket_api_secret: String::new(),
+        polymarket_api_passphrase: String::new(),
+        polymarket_api_url: String::new(),
+        logs_dir: logs_dir.to_string(),
+        evm_private_key: None,
+        polymarket_funder: None,
+        polymarket_signature_type: None,
+        strategy: "audit_signal_strategy".to_string(),
+        rsi_overbought: 65.0,
+        rsi_oversold: 35.0,
+        polymarket_slug_prefix: "eth-updown-15m".to_string(),
+        polymarket_slug_format: PolymarketSlugFormat::Timestamp,
+        polymarket_slug_asset: "ethereum".to_string(),
+        martingale_multiplier: 1.0,
+        martingale_max_amount: 0.0,
+        trade_amount_pct: 0.0,
+        excluded_days: Vec::new(),
+        excluded_hours: Vec::new(),
+        ensemble_min_votes: 1,
+        limit_price_reference: LimitPriceReference::BestAsk,
+        limit_price_offset: 0.01,
+        limit_price_fixed: None,
+        limit_price_high_guard: LimitPriceHighGuard {
+            enabled: false,
+            threshold: 0.60,
+            price: 0.55,
+        },
+        market_order_type: MarketOrderType::Fok,
+        market_threshold_trigger_price: 0.98,
+        market_threshold_order_price: 0.99,
+        market_threshold_order_shares: 5.0,
+        market_threshold_z_min: 2.0,
+        market_threshold_z_lookback_minutes: 60,
+    }
+}
+
+struct AuditSignalStrategy {
+    summary: Option<MicrostructureDecisionSummary>,
+}
+
+impl Strategy for AuditSignalStrategy {
+    fn name(&self) -> &str {
+        "audit_signal_strategy"
+    }
+
+    fn on_closed_candle(&mut self, _candle: &Candle) -> Option<Signal> {
+        None
+    }
+
+    fn on_microstructure_snapshot(&mut self, snapshot: &MicrostructureSnapshot) -> Option<Signal> {
+        self.summary = Some(MicrostructureDecisionSummary {
+            prediction: Some(Prediction::Up),
+            green_votes: 1,
+            red_votes: 0,
+            active_rules: vec!["test_rule".to_string()],
+        });
+        Some(Signal {
+            prediction: Prediction::Up,
+            signal_candle_close_time: snapshot.candle().close_time,
+            rsi: 100.0,
+            strategy_name: self.name().to_string(),
+        })
+    }
+
+    fn last_microstructure_decision_summary(&self) -> Option<MicrostructureDecisionSummary> {
+        self.summary.clone()
+    }
+
+    fn warmup(&mut self, _candle: &Candle) {}
+
+    fn current_rsi(&self) -> Option<f64> {
+        None
+    }
+
+    fn current_series(&self) -> Option<bool> {
+        None
+    }
+
+    fn current_atr(&self) -> Option<f64> {
+        None
+    }
+
+    fn candle_log_extras(&self) -> String {
+        "audit=true".to_string()
+    }
+}
+
+struct AuditOrderClient {
+    audit_path: PathBuf,
+    resolution_saw_audit: Mutex<bool>,
+}
+
+impl AuditOrderClient {
+    fn market(slug: &str) -> MarketInfo {
+        MarketInfo {
+            condition_id: "condition".to_string(),
+            up_token_id: "up".to_string(),
+            down_token_id: "down".to_string(),
+            slug: slug.to_string(),
+            order_min_size: 5.0,
+        }
+    }
+}
+
+type TradingFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+impl PolymarketTradingClient for AuditOrderClient {
+    fn resolve_market<'a>(&'a self, slug: &'a str) -> TradingFuture<'a, MarketInfo> {
+        let audit_exists = std::fs::read_to_string(&self.audit_path)
+            .map(|content| content.contains("\"status\":\"DECISION\""))
+            .unwrap_or(false);
+        *self.resolution_saw_audit.lock().unwrap() = audit_exists;
+        if !audit_exists {
+            return Box::pin(async { Err(anyhow!("audit absent avant resolution")) });
+        }
+        Box::pin(async move { Ok(Self::market(slug)) })
+    }
+
+    fn get_usdc_balance<'a>(&'a self) -> TradingFuture<'a, f64> {
+        Box::pin(async { Ok(10.0) })
+    }
+
+    fn place_order<'a>(
+        &'a self,
+        _signal: &'a Signal,
+        _market: &'a MarketInfo,
+        amount_usdc: f64,
+    ) -> TradingFuture<'a, OrderResult> {
+        Box::pin(async move {
+            Ok(OrderResult {
+                order_id: "audit-order".to_string(),
+                status: "DRY_RUN".to_string(),
+                amount_usdc,
+                limit_price: None,
+                execution_price: None,
+                execution_price_source: None,
+                size_matched: None,
+                submitted_at: Utc::now(),
+                ack_at: Utc::now(),
+            })
+        })
+    }
+
+    fn warm_sdk_caches<'a>(&'a self, _market: &'a MarketInfo) -> TradingFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl PolymarketReadClient for AuditOrderClient {
+    fn get_order_status<'a>(&'a self, _order_id: &'a str) -> TradingFuture<'a, String> {
+        Box::pin(async { Ok("DRY_RUN".to_string()) })
+    }
+
+    fn get_usdc_balance<'a>(&'a self) -> TradingFuture<'a, f64> {
+        Box::pin(async { Ok(10.0) })
+    }
+}
+
+fn complete_snapshot() -> MicrostructureSnapshot {
+    let close_time = Utc.with_ymd_and_hms(2026, 7, 17, 0, 0, 0).unwrap();
+    let candle = Candle {
+        open_time: close_time - Duration::minutes(15),
+        close_time,
+        open: 100.0,
+        high: 101.0,
+        low: 99.0,
+        close: 100.5,
+        volume: 1.0,
+        is_closed: true,
+    };
+    let values: BTreeMap<_, _> = Feature::ALL
+        .iter()
+        .copied()
+        .map(|feature| (feature, 0.0))
+        .collect();
+    MicrostructureSnapshot::new(candle, values)
+}
+
+#[tokio::test]
+async fn persists_audit_record_before_market_resolution() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = config(dir.to_str().unwrap());
+    let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
+    let client = Arc::new(AuditOrderClient {
+        audit_path: logger.microstructure_audit_path().to_path_buf(),
+        resolution_saw_audit: Mutex::new(false),
+    });
+    let trading_client: Arc<dyn PolymarketTradingClient> = client.clone();
+    let tracker_client: Arc<dyn PolymarketReadClient> = client.clone();
+    let money = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
+        10.0,
+        1.0,
+        0.0,
+        dir.to_str().unwrap(),
+    )));
+    let tracker = Arc::new(PositionTracker::new(
+        tracker_client,
+        logger.clone(),
+        money.clone(),
+        dir.to_str().unwrap(),
+        0.0,
+    ));
+    let state = RuntimeState {
+        trade_logger: logger,
+        poly_client: trading_client,
+        money_manager: money,
+        tracker,
+        metrics: Arc::new(RuntimeMetrics::default()),
+    };
+    let mut strategy = AuditSignalStrategy { summary: None };
+
+    let action = process_microstructure_snapshot(
+        &config,
+        Duration::minutes(15),
+        &mut strategy,
+        &state,
+        &complete_snapshot(),
+    )
+    .await;
+
+    assert!(matches!(action, ClosedCandleAction::OrderPlaced { .. }));
+    assert!(*client.resolution_saw_audit.lock().unwrap());
+    std::fs::remove_dir_all(dir).ok();
+}

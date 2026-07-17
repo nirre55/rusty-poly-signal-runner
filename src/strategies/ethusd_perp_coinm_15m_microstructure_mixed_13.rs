@@ -2,7 +2,7 @@ use tracing::debug;
 
 use crate::binance::Candle;
 use crate::microstructure::{Feature, MicrostructureSnapshot};
-use crate::strategy::{Prediction, Signal, Strategy};
+use crate::strategy::{MicrostructureDecisionSummary, Prediction, Signal, Strategy};
 
 const STRATEGY_NAME: &str = "ethusd_perp_coinm_15m_microstructure_mixed_13";
 const MIN_VOTES: u32 = 1;
@@ -355,6 +355,7 @@ static RULES: &[Rule] = &[
 pub struct EthUsdPerpMicrostructureMixed13 {
     last_votes: (u32, u32),
     last_active_rules: String,
+    last_decision: Option<MicrostructureDecisionSummary>,
 }
 
 impl EthUsdPerpMicrostructureMixed13 {
@@ -362,6 +363,7 @@ impl EthUsdPerpMicrostructureMixed13 {
         Self {
             last_votes: (0, 0),
             last_active_rules: String::new(),
+            last_decision: None,
         }
     }
 
@@ -369,6 +371,12 @@ impl EthUsdPerpMicrostructureMixed13 {
         if let Err(error) = snapshot.ensure_complete() {
             self.last_votes = (0, 0);
             self.last_active_rules = format!("snapshot_incomplet: {error}");
+            self.last_decision = Some(MicrostructureDecisionSummary {
+                prediction: None,
+                green_votes: 0,
+                red_votes: 0,
+                active_rules: vec![self.last_active_rules.clone()],
+            });
             return None;
         }
 
@@ -396,10 +404,21 @@ impl EthUsdPerpMicrostructureMixed13 {
         );
 
         let prediction = match (green_votes > 0, red_votes > 0) {
-            (true, false) => Prediction::Up,
-            (false, true) => Prediction::Down,
-            _ => return None,
+            (true, false) => Some(Prediction::Up),
+            (false, true) => Some(Prediction::Down),
+            _ => None,
         };
+        self.last_decision = Some(MicrostructureDecisionSummary {
+            prediction: prediction.clone(),
+            green_votes,
+            red_votes,
+            active_rules: active_rules
+                .iter()
+                .map(|rule| (*rule).to_string())
+                .collect(),
+        });
+
+        let prediction = prediction?;
         let total = green_votes + red_votes;
         let vote_pct = green_votes.max(red_votes) as f64 / total as f64 * 100.0;
 
@@ -435,6 +454,10 @@ impl Strategy for EthUsdPerpMicrostructureMixed13 {
 
     fn on_microstructure_snapshot(&mut self, snapshot: &MicrostructureSnapshot) -> Option<Signal> {
         self.evaluate(snapshot)
+    }
+
+    fn last_microstructure_decision_summary(&self) -> Option<MicrostructureDecisionSummary> {
+        self.last_decision.clone()
     }
 
     fn current_rsi(&self) -> Option<f64> {

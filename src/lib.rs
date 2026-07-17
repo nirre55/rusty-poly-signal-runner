@@ -3,6 +3,7 @@ pub mod config;
 pub mod interval;
 pub mod logger;
 pub mod microstructure;
+pub mod microstructure_audit;
 pub mod money;
 pub mod polymarket;
 pub mod portfolio;

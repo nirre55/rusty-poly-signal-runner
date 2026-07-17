@@ -13,6 +13,7 @@ use crate::logger::{
     PendingBuyTradeRecord, TradeLogger, TradeRecord,
 };
 use crate::microstructure::MicrostructureSnapshot;
+use crate::microstructure_audit::MicrostructureAuditRecord;
 use crate::money::MoneyManager;
 use crate::polymarket::{MarketInfo, OrderResult, PolymarketClient};
 use crate::runtime_metrics::RuntimeMetrics;
@@ -68,6 +69,7 @@ impl PolymarketTradingClient for PolymarketClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClosedCandleAction {
     NoSignal,
+    AuditFailed,
     Filtered,
     DuplicateSignal,
     MarketResolveFailed,
@@ -224,6 +226,42 @@ pub async fn process_microstructure_snapshot(
 ) -> ClosedCandleAction {
     let candle = snapshot.candle();
     let signal = strategy.on_microstructure_snapshot(snapshot);
+    let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1)).timestamp_millis();
+    let slug = PolymarketClient::build_configured_slug(config, next_open_ms);
+    let Some(summary) = strategy.last_microstructure_decision_summary() else {
+        error!(
+            "[AUDIT] resume microstructure absent; aucun ordre ne sera envoye | strategy={}",
+            strategy.name()
+        );
+        return finish(state, ClosedCandleAction::AuditFailed);
+    };
+    let mut audit_record = match MicrostructureAuditRecord::decision(
+        snapshot,
+        strategy.name(),
+        &summary,
+        slug,
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            error!(
+                "[AUDIT] decision non serialisable; aucun ordre ne sera envoye | strategy={} error={}",
+                strategy.name(),
+                error
+            );
+            return finish(state, ClosedCandleAction::AuditFailed);
+        }
+    };
+    if let Err(error) = state
+        .trade_logger
+        .log_microstructure_audit(&mut audit_record)
+    {
+        error!(
+            "[AUDIT] ecriture durable echouee; aucun ordre ne sera envoye | strategy={} error={}",
+            strategy.name(),
+            error
+        );
+        return finish(state, ClosedCandleAction::AuditFailed);
+    }
     process_signal_for_candle(config, interval_duration, strategy, state, candle, signal).await
 }
 

@@ -9,6 +9,18 @@ pub enum Prediction {
     Down,
 }
 
+/// Résultat déterministe de la dernière évaluation microstructure.
+///
+/// Il est séparé du signal afin qu'un `SKIP` reste traçable dans le journal
+/// d'audit sans jamais être interprété comme un ordre.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrostructureDecisionSummary {
+    pub prediction: Option<Prediction>,
+    pub green_votes: u32,
+    pub red_votes: u32,
+    pub active_rules: Vec<String>,
+}
+
 impl std::fmt::Display for Prediction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -39,6 +51,11 @@ pub trait Strategy: Send + Sync {
     /// Evalue un snapshot microstructure causal. Les strategies historiques
     /// utilisent l'implementation par defaut et restent alimentees par Candle.
     fn on_microstructure_snapshot(&mut self, _snapshot: &MicrostructureSnapshot) -> Option<Signal> {
+        None
+    }
+    /// Retourne le résultat de la dernière évaluation microstructure lorsqu'il
+    /// est disponible pour l'audit. Les stratégies historiques retournent `None`.
+    fn last_microstructure_decision_summary(&self) -> Option<MicrostructureDecisionSummary> {
         None
     }
     /// Alimente l'historique sans logger ni retourner de signal (préchargement).

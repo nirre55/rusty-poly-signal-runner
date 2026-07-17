@@ -5,6 +5,7 @@ use crate::trading_runtime::ClosedCandleAction;
 #[derive(Debug, Default)]
 pub struct RuntimeMetrics {
     no_signal: AtomicU64,
+    audit_failed: AtomicU64,
     filtered: AtomicU64,
     duplicate_signal: AtomicU64,
     market_resolve_failed: AtomicU64,
@@ -15,6 +16,7 @@ pub struct RuntimeMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeMetricsSnapshot {
     pub no_signal: u64,
+    pub audit_failed: u64,
     pub filtered: u64,
     pub duplicate_signal: u64,
     pub market_resolve_failed: u64,
@@ -27,6 +29,9 @@ impl RuntimeMetrics {
         match action {
             ClosedCandleAction::NoSignal => {
                 self.no_signal.fetch_add(1, Ordering::Relaxed);
+            }
+            ClosedCandleAction::AuditFailed => {
+                self.audit_failed.fetch_add(1, Ordering::Relaxed);
             }
             ClosedCandleAction::Filtered => {
                 self.filtered.fetch_add(1, Ordering::Relaxed);
@@ -49,6 +54,7 @@ impl RuntimeMetrics {
     pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
             no_signal: self.no_signal.load(Ordering::Relaxed),
+            audit_failed: self.audit_failed.load(Ordering::Relaxed),
             filtered: self.filtered.load(Ordering::Relaxed),
             duplicate_signal: self.duplicate_signal.load(Ordering::Relaxed),
             market_resolve_failed: self.market_resolve_failed.load(Ordering::Relaxed),

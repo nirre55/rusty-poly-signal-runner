@@ -9,6 +9,7 @@ use rusty_poly_signal_runner::config::{Config, ExecutionMode};
 use rusty_poly_signal_runner::interval::parse_interval_duration;
 use rusty_poly_signal_runner::logger::TradeLogger;
 use rusty_poly_signal_runner::microstructure::EthUsdPerpMicrostructureCollector;
+use rusty_poly_signal_runner::microstructure_audit::MicrostructureAuditRecord;
 use rusty_poly_signal_runner::money::MoneyManager;
 use rusty_poly_signal_runner::polymarket::PolymarketClient;
 use rusty_poly_signal_runner::runtime_metrics::RuntimeMetrics;
@@ -175,6 +176,7 @@ async fn main() -> Result<()> {
             .await;
             let snapshot = metrics.snapshot();
             let total = snapshot.no_signal
+                + snapshot.audit_failed
                 + snapshot.filtered
                 + snapshot.duplicate_signal
                 + snapshot.market_resolve_failed
@@ -182,8 +184,9 @@ async fn main() -> Result<()> {
                 + snapshot.order_placed;
             if total > 0 && total % 50 == 0 {
                 info!(
-                    "[METRICS] no_signal={} filtered={} duplicate={} market_errors={} order_errors={} orders={}",
+                    "[METRICS] no_signal={} audit_failed={} filtered={} duplicate={} market_errors={} order_errors={} orders={}",
                     snapshot.no_signal,
+                    snapshot.audit_failed,
                     snapshot.filtered,
                     snapshot.duplicate_signal,
                     snapshot.market_resolve_failed,
@@ -259,6 +262,20 @@ async fn run_microstructure_strategy(
                     "[MICROSTRUCTURE] snapshot indisponible, aucun signal emis: {}",
                     error
                 );
+                let mut record = MicrostructureAuditRecord::collection_error(
+                    strategy.name(),
+                    &error.to_string(),
+                );
+                if let Err(audit_error) = runtime_state
+                    .trade_logger
+                    .log_microstructure_audit(&mut record)
+                {
+                    error!(
+                        "[AUDIT] ecriture collection error echouee | strategy={} error={}",
+                        strategy.name(),
+                        audit_error
+                    );
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }

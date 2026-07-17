@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::info;
 
+use crate::microstructure_audit::{MicrostructureAuditLogger, MicrostructureAuditRecord};
 use crate::trade_timing::TradeLatencies;
 
 #[derive(Debug, Serialize)]
@@ -78,6 +79,7 @@ impl TradeRecord {
 
 pub struct TradeLogger {
     csv_path: PathBuf,
+    microstructure_audit: MicrostructureAuditLogger,
     /// Protège les accès concurrents au fichier CSV (read-modify-write).
     lock: Mutex<()>,
 }
@@ -86,6 +88,7 @@ impl TradeLogger {
     pub fn new(logs_dir: &str) -> Result<Self> {
         fs::create_dir_all(logs_dir)?;
         let csv_path = PathBuf::from(logs_dir).join("trades.csv");
+        let microstructure_audit = MicrostructureAuditLogger::new(logs_dir)?;
 
         // P7 : écrire les headers si le fichier n'existe pas OU s'il est vide
         // (couvre le cas d'un crash pendant l'initialisation qui laisse un fichier vide)
@@ -129,8 +132,17 @@ impl TradeLogger {
 
         Ok(Self {
             csv_path,
+            microstructure_audit,
             lock: Mutex::new(()),
         })
+    }
+
+    pub fn log_microstructure_audit(&self, record: &mut MicrostructureAuditRecord) -> Result<()> {
+        self.microstructure_audit.append(record)
+    }
+
+    pub fn microstructure_audit_path(&self) -> &std::path::Path {
+        self.microstructure_audit.path()
     }
 
     pub fn has_signal_key(&self, signal_key: &str) -> Result<bool> {

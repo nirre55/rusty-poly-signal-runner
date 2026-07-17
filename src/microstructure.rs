@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use crate::binance::Candle;
@@ -157,15 +158,54 @@ impl Feature {
     }
 }
 
+impl FromStr for Feature {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|feature| feature.as_str() == value)
+            .ok_or_else(|| format!("feature microstructure inconnue: {value}"))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MicrostructureSnapshot {
     candle: Candle,
     values: BTreeMap<Feature, f64>,
+    observed_at: DateTime<Utc>,
+    feature_source_times: BTreeMap<Feature, DateTime<Utc>>,
 }
 
 impl MicrostructureSnapshot {
     pub fn new(candle: Candle, values: BTreeMap<Feature, f64>) -> Self {
-        Self { candle, values }
+        let observed_at = candle.close_time;
+        let feature_source_times = values
+            .keys()
+            .copied()
+            .map(|feature| (feature, observed_at))
+            .collect();
+        Self {
+            candle,
+            values,
+            observed_at,
+            feature_source_times,
+        }
+    }
+
+    pub fn with_metadata(
+        candle: Candle,
+        values: BTreeMap<Feature, f64>,
+        observed_at: DateTime<Utc>,
+        feature_source_times: BTreeMap<Feature, DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            candle,
+            values,
+            observed_at,
+            feature_source_times,
+        }
     }
 
     pub fn candle(&self) -> &Candle {
@@ -174,6 +214,18 @@ impl MicrostructureSnapshot {
 
     pub fn value(&self, feature: Feature) -> Option<f64> {
         self.values.get(&feature).copied()
+    }
+
+    pub fn values(&self) -> &BTreeMap<Feature, f64> {
+        &self.values
+    }
+
+    pub fn observed_at(&self) -> DateTime<Utc> {
+        self.observed_at
+    }
+
+    pub fn feature_source_times(&self) -> &BTreeMap<Feature, DateTime<Utc>> {
+        &self.feature_source_times
     }
 
     pub fn is_complete(&self) -> bool {
@@ -193,6 +245,25 @@ impl MicrostructureSnapshot {
         } else {
             bail!("snapshot microstructure incomplet: {}", missing.join(", "))
         }
+    }
+
+    pub fn ensure_audit_complete(&self) -> Result<()> {
+        self.ensure_complete()?;
+        for feature in Feature::ALL {
+            let source_time = self
+                .feature_source_times
+                .get(feature)
+                .ok_or_else(|| anyhow!("horodatage source absent pour {}", feature.as_str()))?;
+            if *source_time > self.candle.close_time {
+                bail!(
+                    "horodatage source futur pour {}: {} > {}",
+                    feature.as_str(),
+                    source_time,
+                    self.candle.close_time
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -331,6 +402,11 @@ impl EthUsdPerpMicrostructureCollector {
         let target = &target_m15[target_index];
         let decision_time = target.candle.close_time;
         let signal_open = target.candle.open_time;
+        let mut feature_source_times = Feature::ALL
+            .iter()
+            .copied()
+            .map(|feature| (feature, decision_time))
+            .collect::<BTreeMap<_, _>>();
 
         let mut values = technical_values(&target_m15, target_index)?;
         let target_m1 = aggregate_m1(&target_m1, signal_open)?;
@@ -476,19 +552,23 @@ impl EthUsdPerpMicrostructureCollector {
             return_n(&index_eth_m15, index_eth_index, 1)?,
         );
 
-        insert(
-            &mut values,
-            Feature::OiEthusdtValueChange6,
-            open_interest_value_change(&open_interest, decision_time, 6)?,
-        );
-        insert(
-            &mut values,
-            Feature::OiEthusdtValueChange12,
-            open_interest_value_change(&open_interest, decision_time, 12)?,
-        );
+        let (oi_change_6, oi_source_time) =
+            open_interest_value_change_with_timestamp(&open_interest, decision_time, 6)?;
+        insert(&mut values, Feature::OiEthusdtValueChange6, oi_change_6);
+        feature_source_times.insert(Feature::OiEthusdtValueChange6, oi_source_time);
 
-        let snapshot = MicrostructureSnapshot::new(target.candle.clone(), values);
-        snapshot.ensure_complete()?;
+        let (oi_change_12, oi_source_time) =
+            open_interest_value_change_with_timestamp(&open_interest, decision_time, 12)?;
+        insert(&mut values, Feature::OiEthusdtValueChange12, oi_change_12);
+        feature_source_times.insert(Feature::OiEthusdtValueChange12, oi_source_time);
+
+        let snapshot = MicrostructureSnapshot::with_metadata(
+            target.candle.clone(),
+            values,
+            observed_at,
+            feature_source_times,
+        );
+        snapshot.ensure_audit_complete()?;
         Ok(snapshot)
     }
 
@@ -986,11 +1066,11 @@ fn close_location(candle: &RichCandle) -> f64 {
     (candle.candle.close - candle.candle.low) / (candle.candle.high - candle.candle.low + EPS)
 }
 
-fn open_interest_value_change(
+fn open_interest_value_change_with_timestamp(
     rows: &[OpenInterest],
     decision_time: DateTime<Utc>,
     lag: usize,
-) -> Result<f64> {
+) -> Result<(f64, DateTime<Utc>)> {
     let index = rows
         .iter()
         .rposition(|row| row.timestamp <= decision_time)
@@ -1013,7 +1093,7 @@ fn open_interest_value_change(
     if previous.value <= 0.0 {
         bail!("valeur OI historique invalide");
     }
-    Ok(current.value / previous.value - 1.0)
+    Ok((current.value / previous.value - 1.0, current.timestamp))
 }
 
 #[cfg(test)]
