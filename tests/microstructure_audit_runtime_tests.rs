@@ -1,10 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{Duration, TimeZone, Utc};
 use rusty_poly_signal_runner::binance::Candle;
-use rusty_poly_signal_runner::config::{
-    Config, ExecutionMode, LimitPriceHighGuard, LimitPriceReference, MarketOrderType,
-    PolymarketSlugFormat,
-};
+use rusty_poly_signal_runner::config::Config;
 use rusty_poly_signal_runner::logger::TradeLogger;
 use rusty_poly_signal_runner::microstructure::{Feature, MicrostructureSnapshot};
 use rusty_poly_signal_runner::money::MoneyManager;
@@ -21,7 +18,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -30,48 +27,59 @@ fn temp_dir() -> PathBuf {
     ))
 }
 
-fn config(logs_dir: &str) -> Config {
-    Config {
-        binance_ws_url: String::new(),
-        symbol: "ethusdt".to_string(),
-        interval: "15m".to_string(),
-        execution_mode: ExecutionMode::DryRun,
-        trade_amount_usdc: 10.0,
-        polymarket_api_key: String::new(),
-        polymarket_api_secret: String::new(),
-        polymarket_api_passphrase: String::new(),
-        polymarket_api_url: String::new(),
-        logs_dir: logs_dir.to_string(),
-        evm_private_key: None,
-        polymarket_funder: None,
-        polymarket_signature_type: None,
-        strategy: "audit_signal_strategy".to_string(),
-        rsi_overbought: 65.0,
-        rsi_oversold: 35.0,
-        polymarket_slug_prefix: "eth-updown-15m".to_string(),
-        polymarket_slug_format: PolymarketSlugFormat::Timestamp,
-        polymarket_slug_asset: "ethereum".to_string(),
-        martingale_multiplier: 1.0,
-        martingale_max_amount: 0.0,
-        trade_amount_pct: 0.0,
-        excluded_days: Vec::new(),
-        excluded_hours: Vec::new(),
-        ensemble_min_votes: 1,
-        limit_price_reference: LimitPriceReference::BestAsk,
-        limit_price_offset: 0.01,
-        limit_price_fixed: None,
-        limit_price_high_guard: LimitPriceHighGuard {
-            enabled: false,
-            threshold: 0.60,
-            price: 0.55,
-        },
-        market_order_type: MarketOrderType::Fok,
-        market_threshold_trigger_price: 0.98,
-        market_threshold_order_price: 0.99,
-        market_threshold_order_shares: 5.0,
-        market_threshold_z_min: 2.0,
-        market_threshold_z_lookback_minutes: 60,
+static CONFIG_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct EnvironmentRestore {
+    original_values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvironmentRestore {
+    fn set(variables: &[(&'static str, &str)]) -> Self {
+        let original_values = variables
+            .iter()
+            .map(|(key, value)| {
+                let original = std::env::var_os(key);
+                std::env::set_var(key, value);
+                (*key, original)
+            })
+            .collect();
+        Self { original_values }
     }
+}
+
+impl Drop for EnvironmentRestore {
+    fn drop(&mut self) {
+        for (key, original) in &self.original_values {
+            match original {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+fn config(logs_dir: &str) -> Config {
+    let _guard = CONFIG_ENV_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _restore = EnvironmentRestore::set(&[
+        ("EXECUTION_MODE", "dry-run"),
+        ("TRADE_AMOUNT_USDC", "10"),
+        ("TRADE_AMOUNT_PCT", "0"),
+        ("SYMBOL", "ethusdt"),
+        ("INTERVAL", "15m"),
+        ("LOGS_DIR", logs_dir),
+        ("STRATEGY", "audit_signal_strategy"),
+        ("POLYMARKET_SLUG_PREFIX", "eth-updown-15m"),
+        ("POLYMARKET_SLUG_FORMAT", "timestamp"),
+        ("POLYMARKET_SLUG_ASSET", "ethereum"),
+        ("EXCLUDED_DAYS", ""),
+        ("EXCLUDED_HOURS", ""),
+        ("STRATEGY_CONFIG", ""),
+    ]);
+
+    Config::from_env().unwrap()
 }
 
 struct AuditSignalStrategy {
