@@ -128,6 +128,7 @@ impl Strategy for AuditSignalStrategy {
 struct AuditOrderClient {
     audit_path: PathBuf,
     resolution_saw_audit: Mutex<bool>,
+    resolution_calls: Mutex<u32>,
 }
 
 impl AuditOrderClient {
@@ -146,6 +147,7 @@ type TradingFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>
 
 impl PolymarketTradingClient for AuditOrderClient {
     fn resolve_market<'a>(&'a self, slug: &'a str) -> TradingFuture<'a, MarketInfo> {
+        *self.resolution_calls.lock().unwrap() += 1;
         let audit_exists = std::fs::read_to_string(&self.audit_path)
             .map(|content| content.contains("\"status\":\"DECISION\""))
             .unwrap_or(false);
@@ -216,38 +218,43 @@ fn complete_snapshot() -> MicrostructureSnapshot {
     MicrostructureSnapshot::new(candle, values)
 }
 
-#[tokio::test]
-async fn persists_audit_record_before_market_resolution() {
-    let dir = temp_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let config = config(dir.to_str().unwrap());
-    let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
+fn runtime_state(logs_dir: &str) -> (RuntimeState, Arc<AuditOrderClient>) {
+    let logger = Arc::new(TradeLogger::new(logs_dir).unwrap());
     let client = Arc::new(AuditOrderClient {
         audit_path: logger.microstructure_audit_path().to_path_buf(),
         resolution_saw_audit: Mutex::new(false),
+        resolution_calls: Mutex::new(0),
     });
     let trading_client: Arc<dyn PolymarketTradingClient> = client.clone();
     let tracker_client: Arc<dyn PolymarketReadClient> = client.clone();
     let money = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
-        10.0,
-        1.0,
-        0.0,
-        dir.to_str().unwrap(),
+        10.0, 1.0, 0.0, logs_dir,
     )));
     let tracker = Arc::new(PositionTracker::new(
         tracker_client,
         logger.clone(),
         money.clone(),
-        dir.to_str().unwrap(),
+        logs_dir,
         0.0,
     ));
-    let state = RuntimeState {
-        trade_logger: logger,
-        poly_client: trading_client,
-        money_manager: money,
-        tracker,
-        metrics: Arc::new(RuntimeMetrics::default()),
-    };
+    (
+        RuntimeState {
+            trade_logger: logger,
+            poly_client: trading_client,
+            money_manager: money,
+            tracker,
+            metrics: Arc::new(RuntimeMetrics::default()),
+        },
+        client,
+    )
+}
+
+#[tokio::test]
+async fn persists_audit_record_before_market_resolution() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = config(dir.to_str().unwrap());
+    let (state, client) = runtime_state(dir.to_str().unwrap());
     let mut strategy = AuditSignalStrategy { summary: None };
 
     let action = process_microstructure_snapshot(
@@ -261,5 +268,63 @@ async fn persists_audit_record_before_market_resolution() {
 
     assert!(matches!(action, ClosedCandleAction::OrderPlaced { .. }));
     assert!(*client.resolution_saw_audit.lock().unwrap());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn rejects_a_snapshot_observed_before_close_without_resolving_a_market() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = config(dir.to_str().unwrap());
+    let (state, client) = runtime_state(dir.to_str().unwrap());
+    let complete = complete_snapshot();
+    let snapshot = MicrostructureSnapshot::with_metadata(
+        complete.candle().clone(),
+        complete.values().clone(),
+        complete.candle().close_time - Duration::milliseconds(1),
+        complete.feature_source_times().clone(),
+    );
+    let mut strategy = AuditSignalStrategy { summary: None };
+
+    let action = process_microstructure_snapshot(
+        &config,
+        Duration::minutes(15),
+        &mut strategy,
+        &state,
+        &snapshot,
+    )
+    .await;
+
+    assert_eq!(action, ClosedCandleAction::AuditFailed);
+    assert_eq!(*client.resolution_calls.lock().unwrap(), 0);
+    assert_eq!(state.metrics.snapshot().audit_failed, 1);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn refuses_execution_when_the_audit_journal_becomes_corrupted() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = config(dir.to_str().unwrap());
+    let (state, client) = runtime_state(dir.to_str().unwrap());
+    std::fs::write(
+        state.trade_logger.microstructure_audit_path(),
+        "{\"invalid\":true}\n",
+    )
+    .unwrap();
+    let mut strategy = AuditSignalStrategy { summary: None };
+
+    let action = process_microstructure_snapshot(
+        &config,
+        Duration::minutes(15),
+        &mut strategy,
+        &state,
+        &complete_snapshot(),
+    )
+    .await;
+
+    assert_eq!(action, ClosedCandleAction::AuditFailed);
+    assert_eq!(*client.resolution_calls.lock().unwrap(), 0);
+    assert_eq!(state.metrics.snapshot().audit_failed, 1);
     std::fs::remove_dir_all(dir).ok();
 }

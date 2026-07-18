@@ -249,6 +249,13 @@ impl MicrostructureSnapshot {
 
     pub fn ensure_audit_complete(&self) -> Result<()> {
         self.ensure_complete()?;
+        if self.observed_at < self.candle.close_time {
+            bail!(
+                "horodatage d'observation precedent la cloture: {} < {}",
+                self.observed_at,
+                self.candle.close_time
+            );
+        }
         for feature in Feature::ALL {
             let source_time = self
                 .feature_source_times
@@ -1144,5 +1151,70 @@ mod tests {
 
         assert!(!snapshot.is_complete());
         assert!(snapshot.ensure_complete().is_err());
+    }
+
+    #[test]
+    fn feature_names_round_trip_through_the_audit_parser() {
+        for feature in Feature::ALL {
+            assert_eq!(Feature::from_str(feature.as_str()), Ok(*feature));
+        }
+    }
+
+    #[test]
+    fn audit_snapshot_rejects_observation_before_candle_close() {
+        let close_time = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let candle = rich_candle(close_time - ChronoDuration::minutes(1), 100.0, 101.0).candle;
+        let values = Feature::ALL
+            .iter()
+            .copied()
+            .map(|feature| (feature, 0.0))
+            .collect();
+        let source_times = Feature::ALL
+            .iter()
+            .copied()
+            .map(|feature| (feature, candle.close_time))
+            .collect();
+        let snapshot = MicrostructureSnapshot::with_metadata(
+            candle.clone(),
+            values,
+            candle.close_time - ChronoDuration::milliseconds(1),
+            source_times,
+        );
+
+        let error = snapshot.ensure_audit_complete().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("observation precedent la cloture"));
+    }
+
+    #[test]
+    fn audit_snapshot_rejects_a_future_feature_source_time() {
+        let close_time = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let candle = rich_candle(close_time - ChronoDuration::minutes(1), 100.0, 101.0).candle;
+        let values = Feature::ALL
+            .iter()
+            .copied()
+            .map(|feature| (feature, 0.0))
+            .collect();
+        let mut source_times = Feature::ALL
+            .iter()
+            .copied()
+            .map(|feature| (feature, candle.close_time))
+            .collect::<BTreeMap<_, _>>();
+        source_times.insert(
+            Feature::SignalReturn6,
+            candle.close_time + ChronoDuration::milliseconds(1),
+        );
+        let snapshot = MicrostructureSnapshot::with_metadata(
+            candle.clone(),
+            values,
+            candle.close_time,
+            source_times,
+        );
+
+        let error = snapshot.ensure_audit_complete().unwrap_err();
+
+        assert!(error.to_string().contains("horodatage source futur"));
     }
 }

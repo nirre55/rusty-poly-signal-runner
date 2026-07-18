@@ -663,4 +663,30 @@ mod tests {
             .any(|failure| failure.contains("record_hash invalide")));
         fs::remove_dir_all(dir).ok();
     }
+
+    #[test]
+    fn refuses_to_reopen_a_journal_with_a_tampered_chain_link() {
+        let dir = temp_dir("tampered_chain_link");
+        let logger = MicrostructureAuditLogger::new(dir.to_str().unwrap()).unwrap();
+        let source_time = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut first = decision_record(source_time);
+        logger.append(&mut first).unwrap();
+        let mut second = decision_record(source_time + Duration::minutes(15));
+        logger.append(&mut second).unwrap();
+
+        let path = logger.path().to_path_buf();
+        let content = fs::read_to_string(&path).unwrap();
+        let tampered = content.replacen(&first.record_hash, "0".repeat(64).as_str(), 1);
+        fs::write(&path, tampered).unwrap();
+
+        let error = match MicrostructureAuditLogger::new(dir.to_str().unwrap()) {
+            Ok(_) => panic!("le journal corrompu a ete accepte"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("journal d'audit existant invalide"));
+        fs::remove_dir_all(dir).ok();
+    }
 }
