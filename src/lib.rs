@@ -2,6 +2,7 @@ pub mod binance;
 pub mod config;
 pub mod interval;
 pub mod logger;
+pub mod market_recorder;
 pub mod money;
 pub mod polymarket;
 pub mod portfolio;

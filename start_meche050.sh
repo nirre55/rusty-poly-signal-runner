@@ -6,7 +6,8 @@ cd "$ROOT"
 
 CONFIG_PATH="$ROOT/${MECHE050_CONFIG:-configs/meche050_portfolio.env}"
 ENABLED_PATH="$ROOT/${MECHE050_ENABLED_CONFIG:-configs/meche050_enabled.env}"
-SUPERVISOR_DIR="$ROOT/logs/meche050/supervisor"
+RUNTIME_LOGS="${MECHE050_RUNTIME_LOGS:-logs/meche050}"
+SUPERVISOR_DIR="$ROOT/$RUNTIME_LOGS/supervisor"
 PID_FILE="$SUPERVISOR_DIR/portfolio_runner.pid"
 LOG_FILE="$SUPERVISOR_DIR/portfolio_runner.console.log"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
@@ -31,8 +32,8 @@ Usage:
 
 Strategies: boll_fade, streak_rsi, trio_vote2, reversal_pro
 
-The strategy commands atomically rewrite configs/meche050_enabled.env, then restart
-the single shared runner. Existing orders remain in portfolio_state.json for settlement.
+The strategy commands atomically rewrite the selected activation grid, then restart
+the selected shared runner. Existing state remains in its configured LOGS_DIR.
 EOF
 }
 
