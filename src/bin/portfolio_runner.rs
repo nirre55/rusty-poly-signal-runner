@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use rusty_poly_signal_runner::binance::{self, Candle};
 use rusty_poly_signal_runner::config::{Config, ExecutionMode, PolymarketSlugFormat};
+use rusty_poly_signal_runner::market_recorder::{RecorderSettings, SignalMarketRecorder};
 use rusty_poly_signal_runner::polymarket::{MarketInfo, PolymarketClient};
 use rusty_poly_signal_runner::portfolio::{
     group_signals, size_window, EnabledStrategies, MarketSlot, PortfolioSettings, PortfolioSignal,
@@ -103,6 +104,7 @@ struct WindowContext<'a> {
     book: &'a mut PortfolioBook,
     state_path: PathBuf,
     event_path: PathBuf,
+    recorder: Option<&'a SignalMarketRecorder>,
 }
 
 #[tokio::main]
@@ -136,12 +138,26 @@ async fn main() -> Result<()> {
             .count(),
     );
 
+    let recorder_settings = RecorderSettings::from_env(&config.logs_dir)?;
+    if recorder_settings.enabled && !matches!(config.execution_mode, ExecutionMode::DryRun) {
+        return Err(anyhow!(
+            "PORTFOLIO_RECORDER_ENABLED=true requiert EXECUTION_MODE=dry-run"
+        ));
+    }
     let client = Arc::new(PolymarketClient::new(config.clone()));
-    client.warm_up().await;
-    tokio::spawn({
-        let client = client.clone();
-        async move { client.run_keep_alive_loop().await }
-    });
+    if should_submit_real_order(&config.execution_mode) {
+        client.warm_up().await;
+        tokio::spawn({
+            let client = client.clone();
+            async move { client.run_keep_alive_loop().await }
+        });
+    } else {
+        info!("Dry-run: pré-authentification SDK et boucle CLOB désactivées");
+    }
+
+    let recorder =
+        SignalMarketRecorder::start(recorder_settings, client.clone(), feed_configs.clone())
+            .await?;
 
     let (tx, mut rx) = mpsc::channel::<FeedCandleEvent>(256);
     for market in MarketSlot::ALL {
@@ -164,11 +180,27 @@ async fn main() -> Result<()> {
         book: &mut book,
         state_path,
         event_path,
+        recorder: recorder.as_ref(),
     };
 
     loop {
         tokio::select! {
             Some(event) = rx.recv() => {
+                if let Some(recorder) = recorder.as_ref() {
+                    recorder
+                        .record_binance_candle(event.feed.market, &event.candle)
+                        .await;
+                    if let Err(error) = recorder
+                        .record_signals(
+                            event.feed.entry_time_ms,
+                            &event.feed.signals,
+                            &event.candle,
+                        )
+                        .await
+                    {
+                        error!("Enregistrement signal Polymarket: {error:#}");
+                    }
+                }
                 settle_orders(
                     window_context.client,
                     window_context.book,
@@ -323,6 +355,12 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             Ok(balance) if balance > 0.0 => balance,
             Ok(_) => {
                 warn!("Fenêtre ignorée: solde USDC nul");
+                record_all_sizing_updates(
+                    context,
+                    &batch,
+                    "SKIPPED_NO_BALANCE",
+                    json!({"capital_usdc": 0.0}),
+                );
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_NO_BALANCE",
@@ -332,6 +370,12 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             }
             Err(error) => {
                 warn!("Fenêtre ignorée: lecture solde USDC échouée: {error:#}");
+                record_all_sizing_updates(
+                    context,
+                    &batch,
+                    "SKIPPED_BALANCE_ERROR",
+                    json!({"error": error.to_string()}),
+                );
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_BALANCE_ERROR",
@@ -353,6 +397,7 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
         let key = order_key(&slug, &group.prediction);
         if context.book.has_seen(&key) {
             warn!("Fenêtre dupliquée déjà persistée: {key}");
+            record_all_sizing_updates(context, &batch, "SKIPPED_DUPLICATE", json!({"key": key}));
             log_event(
                 &context.event_path,
                 "WINDOW_SKIPPED_DUPLICATE",
@@ -365,6 +410,12 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             Ok(info) => info,
             Err(error) => {
                 warn!("Fenêtre ignorée: marché {slug} introuvable: {error:#}");
+                record_all_sizing_updates(
+                    context,
+                    &batch,
+                    "SKIPPED_MARKET_ERROR",
+                    json!({"slug": slug, "error": error.to_string()}),
+                );
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_MARKET_ERROR",
@@ -392,6 +443,16 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             window_budget_usdc,
             total_usdc,
         } => {
+            record_all_sizing_updates(
+                context,
+                &batch,
+                "SKIPPED_MINIMUMS_EXCEED_WINDOW",
+                json!({
+                    "capital_usdc": capital_usdc,
+                    "window_budget_usdc": window_budget_usdc,
+                    "minimums_total_usdc": total_usdc,
+                }),
+            );
             warn!(
                 "Fenêtre ignorée: minima {:.2}$ > budget W {:.2}$",
                 total_usdc, window_budget_usdc
@@ -411,6 +472,15 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             capital_usdc,
             minimum_usdc,
         } => {
+            record_all_sizing_updates(
+                context,
+                &batch,
+                "SKIPPED_INSUFFICIENT_CAPITAL",
+                json!({
+                    "capital_usdc": capital_usdc,
+                    "minimum_usdc": minimum_usdc,
+                }),
+            );
             warn!(
                 "Fenetre ignoree: capital disponible {:.2}$ < minimum {:.2}$",
                 capital_usdc, minimum_usdc
@@ -434,6 +504,50 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
             skipped_insufficient_capital_orders,
             ..
         } => {
+            for signal in &batch.signals {
+                let sized = orders.iter().find(|order| {
+                    order.group.market == signal.market
+                        && order.group.prediction == signal.prediction
+                        && order
+                            .group
+                            .contributors
+                            .iter()
+                            .any(|contributor| contributor.strategy == signal.strategy)
+                });
+                if let Some(sized) = sized {
+                    record_sizing_update(
+                        context,
+                        batch.entry_time_ms,
+                        signal,
+                        "DRY_RUN_ORDER_CANDIDATE",
+                        json!({
+                            "capital_usdc": capital_usdc,
+                            "window_budget_usdc": window_budget_usdc,
+                            "group_allocation_usdc": sized.allocation_usdc,
+                            "per_signal_allocation_usdc": sized.allocation_usdc
+                                / sized.group.contributors.len() as f64,
+                            "combined_amount_usdc": sized.amount_usdc,
+                            "minimum_usdc": sized.minimum_usdc,
+                            "contributor_count": sized.group.contributors.len(),
+                            "minimum_overrides_window": minimum_overrides_window,
+                            "fixed_limit_price": FIXED_LIMIT_PRICE,
+                            "minimum_shares": MINIMUM_SHARES,
+                        }),
+                    );
+                } else {
+                    record_sizing_update(
+                        context,
+                        batch.entry_time_ms,
+                        signal,
+                        "SKIPPED_AFTER_MINIMUM_CAPITAL_PRIORITY",
+                        json!({
+                            "capital_usdc": capital_usdc,
+                            "window_budget_usdc": window_budget_usdc,
+                            "skipped_orders": skipped_insufficient_capital_orders,
+                        }),
+                    );
+                }
+            }
             if minimum_overrides_window {
                 warn!(
                     "Minimum 5 shares prioritaire: total {:.2}$ > budget W {:.2}$",
@@ -544,6 +658,27 @@ async fn submit_combined_order(
     context.book.begin_submission(order)?;
     context.book.save(&context.state_path)?;
 
+    if !should_submit_real_order(&context.config.execution_mode) {
+        context.book.mark_settlement(
+            &key,
+            "DRY_RUN".to_string(),
+            PortfolioOrderPhase::NoEntry,
+            Some("DRY_RUN".to_string()),
+        )?;
+        context.book.save(&context.state_path)?;
+        log_event(
+            &context.event_path,
+            "ORDER_DRY_RUN",
+            json!({
+                "key": key,
+                "amount_usdc": sized.amount_usdc,
+                "limit_price": FIXED_LIMIT_PRICE,
+                "order_submission_called": false,
+            }),
+        );
+        return Ok(());
+    }
+
     let signal = Signal {
         prediction: sized.group.prediction.clone(),
         signal_candle_close_time: signal_close_time,
@@ -555,20 +690,6 @@ async fn submit_combined_order(
         .place_order(&signal, &resolved.info, sized.amount_usdc)
         .await
     {
-        Ok(result) if matches!(context.config.execution_mode, ExecutionMode::DryRun) => {
-            context.book.mark_settlement(
-                &key,
-                result.status,
-                PortfolioOrderPhase::NoEntry,
-                Some("DRY_RUN".to_string()),
-            )?;
-            context.book.save(&context.state_path)?;
-            log_event(
-                &context.event_path,
-                "ORDER_DRY_RUN",
-                json!({"key": key, "amount_usdc": sized.amount_usdc}),
-            );
-        }
         Ok(result) => {
             context.book.mark_submitted(
                 &key,
@@ -664,6 +785,10 @@ fn order_key(slug: &str, prediction: &Prediction) -> String {
     format!("meche050:{}:{}", slug.to_ascii_lowercase(), prediction)
 }
 
+fn should_submit_real_order(mode: &ExecutionMode) -> bool {
+    !matches!(mode, ExecutionMode::DryRun)
+}
+
 fn is_filled(status: &str) -> bool {
     matches!(status.to_ascii_uppercase().as_str(), "MATCHED" | "FILLED")
 }
@@ -701,5 +826,50 @@ fn log_event(path: &Path, event_type: &str, details: serde_json::Value) {
     });
     if let Err(error) = append_event(path, &event) {
         warn!("Journal portefeuille indisponible: {error:#}");
+    }
+}
+
+fn record_all_sizing_updates(
+    context: &WindowContext<'_>,
+    batch: &WindowBatch,
+    disposition: &str,
+    details: serde_json::Value,
+) {
+    for signal in &batch.signals {
+        record_sizing_update(
+            context,
+            batch.entry_time_ms,
+            signal,
+            disposition,
+            details.clone(),
+        );
+    }
+}
+
+fn record_sizing_update(
+    context: &WindowContext<'_>,
+    entry_time_ms: i64,
+    signal: &PortfolioSignal,
+    disposition: &str,
+    details: serde_json::Value,
+) {
+    let Some(recorder) = context.recorder else {
+        return;
+    };
+    if let Err(error) = recorder.record_sizing_update(entry_time_ms, signal, disposition, details) {
+        warn!("Journal sizing signal indisponible: {error:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_submit_real_order;
+    use rusty_poly_signal_runner::config::ExecutionMode;
+
+    #[test]
+    fn recorder_dry_run_never_uses_the_real_order_path() {
+        assert!(!should_submit_real_order(&ExecutionMode::DryRun));
+        assert!(should_submit_real_order(&ExecutionMode::Limit));
+        assert!(should_submit_real_order(&ExecutionMode::Market));
     }
 }
