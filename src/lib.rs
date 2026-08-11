@@ -2,6 +2,7 @@ pub mod binance;
 pub mod config;
 pub mod interval;
 pub mod logger;
+pub mod market_recorder;
 pub mod microstructure;
 pub mod microstructure_audit;
 pub mod money;
