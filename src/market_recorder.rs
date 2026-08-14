@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -674,7 +674,7 @@ enum SessionControl {
     Discard,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StreamEnvelope {
     schema_version: u32,
     session_id: String,
@@ -741,6 +741,7 @@ struct SessionWorker {
     completion_tx: mpsc::Sender<SessionKey>,
     active: bool,
     resumed: bool,
+    recovery_complete: bool,
     signal_ids: Vec<String>,
     ring: EventRing,
     writer: Option<tokio::fs::File>,
@@ -768,6 +769,12 @@ struct RecoveredStreamStats {
     last_server_timestamp_ms: Option<i64>,
 }
 
+#[derive(Default)]
+struct RecoveredStreamState {
+    stats: RecoveredStreamStats,
+    restored_signal_ids: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ResolutionRecord {
     source: &'static str,
@@ -787,17 +794,48 @@ impl SessionWorker {
         let active = persisted.activated;
         let signal_ids = persisted.signal_ids.clone();
         let ring = EventRing::new(settings.pre_signal);
-        let recovered = if resumed {
-            recover_stream_stats(&persisted.stream_path).unwrap_or_default()
-        } else {
-            RecoveredStreamStats::default()
-        };
-        let analyzer = SessionAnalyzer::new(
+        let mut analyzer = SessionAnalyzer::new(
             persisted.market_info.up_token_id.clone(),
             persisted.market_info.down_token_id.clone(),
             settings.limit_price,
             persisted.market_info.order_min_size,
         );
+        let (recovered, mut recovery_complete) = if resumed {
+            match recover_stream_state(&persisted.stream_path, &persisted.signal_ids, &mut analyzer)
+            {
+                Ok(recovered) => {
+                    let expected = persisted
+                        .signal_ids
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let complete = recovered.restored_signal_ids == expected;
+                    (recovered.stats, complete)
+                }
+                Err(err) => {
+                    warn!(
+                        "Reprise analytique impossible {}: {err:#}",
+                        persisted.stream_path.display()
+                    );
+                    (RecoveredStreamStats::default(), false)
+                }
+            }
+        } else {
+            (RecoveredStreamStats::default(), true)
+        };
+        if resumed {
+            match recover_order_candidates(&settings.root, &persisted.signal_ids) {
+                Ok(candidates) => {
+                    for (prediction, amount_usdc) in candidates {
+                        analyzer.set_order_candidate(&prediction, amount_usdc);
+                    }
+                }
+                Err(err) => {
+                    warn!("Reprise sizing recorder impossible: {err:#}");
+                    recovery_complete = false;
+                }
+            }
+        }
         Self {
             persisted,
             settings,
@@ -805,6 +843,7 @@ impl SessionWorker {
             completion_tx,
             active,
             resumed,
+            recovery_complete,
             signal_ids,
             ring,
             writer: None,
@@ -930,6 +969,10 @@ impl SessionWorker {
                             }
                             Some(SessionControl::OrderCandidate { prediction, amount_usdc }) => {
                                 self.analyzer.set_order_candidate(&prediction, amount_usdc);
+                                self.capture_internal(
+                                    "order_candidate",
+                                    json!({"prediction": prediction, "amount_usdc": amount_usdc}),
+                                ).await;
                             }
                             Some(SessionControl::BinanceResult(candle)) => {
                                 self.binance_result = Some(candle);
@@ -1061,6 +1104,10 @@ impl SessionWorker {
                     }
                     Some(SessionControl::OrderCandidate { prediction, amount_usdc }) => {
                         self.analyzer.set_order_candidate(&prediction, amount_usdc);
+                        self.capture_internal(
+                            "order_candidate",
+                            json!({"prediction": prediction, "amount_usdc": amount_usdc}),
+                        ).await;
                         false
                     }
                     Some(SessionControl::BinanceResult(candle)) => {
@@ -1240,9 +1287,16 @@ impl SessionWorker {
         } else {
             "RESOLUTION_TIMEOUT"
         };
+        let analysis_complete = !self.resumed || self.recovery_complete;
+        let source_format = if self.resumed {
+            "runtime_compact_v2_resumed"
+        } else {
+            "runtime_compact_v2"
+        };
         let metrics_path = self.settings.root.join("session_metrics.jsonl");
         let metrics = self.analyzer.clone().finish(SessionMetricContext {
-            source_format: "runtime_compact_v2".to_string(),
+            source_format: source_format.to_string(),
+            analysis_complete,
             session_id: self.persisted.session_id.clone(),
             market_slot: self.persisted.key.market.key().to_string(),
             entry_time_ms: self.persisted.key.entry_time_ms,
@@ -1268,7 +1322,7 @@ impl SessionWorker {
             }
         };
         let mut raw_stream_deleted = false;
-        if metrics_saved && self.settings.delete_stream_after_summary {
+        if metrics_saved && metrics.analysis_complete && self.settings.delete_stream_after_summary {
             match tokio::fs::remove_file(&self.persisted.stream_path).await {
                 Ok(()) => raw_stream_deleted = true,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1302,6 +1356,7 @@ impl SessionWorker {
             "resolution": self.resolution,
             "binance_target_candle": self.binance_result,
             "completion_status": completion_status,
+            "metrics_analysis_complete": metrics.analysis_complete,
             "metrics_path": metrics_path,
             "raw_stream_path": retained_stream_path,
             "raw_stream_deleted": raw_stream_deleted,
@@ -1416,6 +1471,7 @@ fn append_jsonl(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn recover_stream_stats(path: &Path) -> Result<RecoveredStreamStats> {
     if !path.exists() {
         return Ok(RecoveredStreamStats::default());
@@ -1427,29 +1483,178 @@ fn recover_stream_stats(path: &Path) -> Result<RecoveredStreamStats> {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(sequence) = event.get("sequence").and_then(Value::as_u64) {
-            stats.sequence = stats.sequence.max(sequence);
-        }
-        if let Some(kind) = event.get("event_type").and_then(Value::as_str) {
-            *stats.counts.entry(kind.to_string()).or_default() += 1;
-            if kind == "reconnecting" {
-                stats.reconnect_count += 1;
+        update_recovered_stats(&event, &mut stats);
+    }
+    Ok(stats)
+}
+
+fn recover_stream_state(
+    path: &Path,
+    signal_ids: &[String],
+    analyzer: &mut SessionAnalyzer,
+) -> Result<RecoveredStreamState> {
+    if !path.exists() {
+        return Ok(RecoveredStreamState::default());
+    }
+    let groups = group_recovered_signal_ids(signal_ids);
+    let file = fs::File::open(path)?;
+    let mut recovered = RecoveredStreamState::default();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        update_recovered_stats(&event, &mut recovered.stats);
+        let Some(kind) = event.get("event_type").and_then(Value::as_str) else {
+            continue;
+        };
+        let received_at_ms = event
+            .get("received_at_unix_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let payload = event.get("payload").unwrap_or(&Value::Null);
+        match kind {
+            "signal_snapshot" => {
+                let Some(prediction) = payload
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_recovered_prediction)
+                else {
+                    continue;
+                };
+                let ids = groups.get(prediction).cloned().unwrap_or_default();
+                if analyzer.activate_from_compact_snapshot(
+                    prediction,
+                    ids.iter().cloned(),
+                    received_at_ms,
+                    payload,
+                ) {
+                    recovered.restored_signal_ids.extend(ids);
+                }
             }
-            if kind == "gap" {
-                stats.gap_count += 1;
+            "quote" => {
+                analyzer.process_compact_quote(payload, received_at_ms);
             }
-        }
-        if let Some(timestamp) = event.get("server_timestamp").and_then(Value::as_str) {
-            stats
-                .first_server_timestamp
-                .get_or_insert_with(|| timestamp.to_string());
-            stats.last_server_timestamp = Some(timestamp.to_string());
-            if let Ok(timestamp_ms) = timestamp.parse::<i64>() {
-                stats.last_server_timestamp_ms = Some(timestamp_ms);
+            "order_candidate" => {
+                if let (Some(prediction), Some(amount_usdc)) = (
+                    payload.get("prediction").and_then(Value::as_str),
+                    payload.get("amount_usdc").and_then(Value::as_f64),
+                ) {
+                    analyzer.set_order_candidate(prediction, amount_usdc);
+                }
+            }
+            _ => {
+                analyzer.process_payload(payload, received_at_ms);
+                if kind == "signal_activated" {
+                    for (prediction, ids) in &groups {
+                        if ids
+                            .iter()
+                            .all(|signal_id| recovered.restored_signal_ids.contains(signal_id))
+                        {
+                            continue;
+                        }
+                        analyzer.activate(prediction, ids.iter().cloned(), received_at_ms);
+                        recovered.restored_signal_ids.extend(ids.iter().cloned());
+                    }
+                }
             }
         }
     }
-    Ok(stats)
+    Ok(recovered)
+}
+
+fn update_recovered_stats(event: &Value, stats: &mut RecoveredStreamStats) {
+    if let Some(sequence) = event.get("sequence").and_then(Value::as_u64) {
+        stats.sequence = stats.sequence.max(sequence);
+    }
+    if let Some(kind) = event.get("event_type").and_then(Value::as_str) {
+        *stats.counts.entry(kind.to_string()).or_default() += 1;
+        if kind == "reconnecting" {
+            stats.reconnect_count += 1;
+        }
+        if kind == "gap" {
+            stats.gap_count += 1;
+        }
+    }
+    if let Some(timestamp) = event.get("server_timestamp").and_then(Value::as_str) {
+        stats
+            .first_server_timestamp
+            .get_or_insert_with(|| timestamp.to_string());
+        stats.last_server_timestamp = Some(timestamp.to_string());
+        if let Ok(timestamp_ms) = timestamp.parse::<i64>() {
+            stats.last_server_timestamp_ms = Some(timestamp_ms);
+        }
+    }
+}
+
+fn group_recovered_signal_ids(signal_ids: &[String]) -> BTreeMap<String, Vec<String>> {
+    let mut groups = BTreeMap::<String, Vec<String>>::new();
+    for signal_id in signal_ids {
+        let Some(prediction) = signal_id
+            .rsplit(':')
+            .next()
+            .and_then(normalize_recovered_prediction)
+        else {
+            continue;
+        };
+        groups
+            .entry(prediction.to_string())
+            .or_default()
+            .push(signal_id.clone());
+    }
+    groups
+}
+
+fn normalize_recovered_prediction(value: &str) -> Option<&'static str> {
+    if value.eq_ignore_ascii_case("up") {
+        Some("UP")
+    } else if value.eq_ignore_ascii_case("down") {
+        Some("DOWN")
+    } else {
+        None
+    }
+}
+
+fn recover_order_candidates(root: &Path, signal_ids: &[String]) -> Result<BTreeMap<String, f64>> {
+    let path = root.join("signal_sizing.jsonl");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let wanted = signal_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeMap::<String, f64>::new();
+    for line in BufReader::new(fs::File::open(path)?).lines() {
+        let line = line?;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(signal_id) = record.get("signal_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !wanted.contains(signal_id)
+            || record.get("disposition").and_then(Value::as_str) != Some("DRY_RUN_ORDER_CANDIDATE")
+        {
+            continue;
+        }
+        let prediction = record
+            .get("prediction")
+            .and_then(Value::as_str)
+            .or_else(|| signal_id.rsplit(':').next())
+            .and_then(normalize_recovered_prediction);
+        let amount_usdc = record
+            .get("details")
+            .and_then(|details| details.get("combined_amount_usdc"))
+            .and_then(Value::as_f64);
+        if let (Some(prediction), Some(amount_usdc)) = (prediction, amount_usdc) {
+            candidates
+                .entry(prediction.to_string())
+                .and_modify(|current| *current = current.max(amount_usdc))
+                .or_insert(amount_usdc);
+        }
+    }
+    Ok(candidates)
 }
 
 fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1509,14 +1714,16 @@ fn parse_f64_env(key: &str, default: f64) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_jsonl, event_type, payload_contains_event, recover_stream_stats, signal_id,
-        EventRing, RecorderState, SessionKey, StreamEnvelope, SCHEMA_VERSION,
+        append_jsonl, event_type, payload_contains_event, recover_stream_state,
+        recover_stream_stats, signal_id, EventRing, RecorderState, SessionKey, StreamEnvelope,
+        SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use std::time::Duration;
 
     use crate::portfolio::{MarketSlot, PortfolioSignal, PortfolioStrategy};
+    use crate::recorder_metrics::{SessionAnalyzer, SessionMetricContext};
     use crate::strategy::Prediction;
 
     fn envelope(at_ms: i64, sequence: u64) -> StreamEnvelope {
@@ -1641,6 +1848,74 @@ mod tests {
         assert_eq!(stats.gap_count, 1);
         assert_eq!(stats.first_server_timestamp.as_deref(), Some("1000"));
         assert_eq!(stats.last_server_timestamp.as_deref(), Some("2000"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restart_replays_compact_signal_quotes_and_order_candidate() {
+        let path = std::env::temp_dir().join(format!(
+            "meche050-recorder-resume-test-{}-{}.jsonl",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let signal_id = "btc_5m:1000:boll_fade:up".to_string();
+        let mut snapshot = envelope(1_000, 1);
+        snapshot.event_type = "signal_snapshot".to_string();
+        snapshot.payload = json!({
+            "outcome":"UP",
+            "asset_id":"up-token",
+            "best_bid":0.48,
+            "best_ask":0.50,
+            "ask_shares_at_or_below_limit":4.0
+        });
+        let mut quote = envelope(1_250, 2);
+        quote.event_type = "quote".to_string();
+        quote.payload = json!({
+            "outcome":"UP",
+            "asset_id":"up-token",
+            "best_bid":0.49,
+            "best_ask":0.50,
+            "ask_shares_at_or_below_limit":6.0
+        });
+        let mut candidate = envelope(1_300, 3);
+        candidate.event_type = "order_candidate".to_string();
+        candidate.payload = json!({"prediction":"UP", "amount_usdc":2.5});
+        append_jsonl(&path, &snapshot).unwrap();
+        append_jsonl(&path, &quote).unwrap();
+        append_jsonl(&path, &candidate).unwrap();
+
+        let mut analyzer = SessionAnalyzer::new("up-token", "down-token", 0.50, 5.0);
+        let recovered =
+            recover_stream_state(&path, std::slice::from_ref(&signal_id), &mut analyzer).unwrap();
+        assert_eq!(recovered.restored_signal_ids, [signal_id].into());
+        let metrics = analyzer.finish(SessionMetricContext {
+            source_format: "test-resume".to_string(),
+            analysis_complete: true,
+            session_id: "session".to_string(),
+            market_slot: "btc_5m".to_string(),
+            entry_time_ms: 1_000,
+            slug: "slug".to_string(),
+            winning_asset_id: Some("up-token".to_string()),
+            winning_outcome: Some("Up".to_string()),
+            raw_stream_path: None,
+            completion_status: "RESOLVED_WITH_GAPS".to_string(),
+            gap_count: 1,
+            reconnect_count: 0,
+        });
+        let up = metrics
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome == "UP")
+            .unwrap();
+        assert_eq!(up.signal_ids, vec!["btc_5m:1000:boll_fade:up"]);
+        assert_eq!(
+            up.order_candidate
+                .as_ref()
+                .and_then(|candidate| candidate.first_fully_fillable.as_ref())
+                .map(|fill| fill.elapsed_from_signal_ms),
+            Some(250)
+        );
 
         std::fs::remove_file(path).unwrap();
     }

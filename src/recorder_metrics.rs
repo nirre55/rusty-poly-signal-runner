@@ -117,6 +117,7 @@ pub struct CompactEvent {
 #[derive(Debug, Clone)]
 pub struct SessionMetricContext {
     pub source_format: String,
+    pub analysis_complete: bool,
     pub session_id: String,
     pub market_slot: String,
     pub entry_time_ms: i64,
@@ -532,6 +533,52 @@ impl SessionAnalyzer {
         ))
     }
 
+    /// Restores an activation from the compact snapshot written at signal time.
+    pub fn activate_from_compact_snapshot(
+        &mut self,
+        prediction: &str,
+        signal_ids: impl IntoIterator<Item = String>,
+        at_ms: i64,
+        payload: &Value,
+    ) -> bool {
+        let Some(outcome) = normalize_outcome(prediction) else {
+            return false;
+        };
+        let Some(quote) = quote_from_compact_payload(payload, at_ms) else {
+            return false;
+        };
+        if let Some(tracker) = self.trackers.get_mut(outcome) {
+            tracker.activate(
+                signal_ids,
+                at_ms,
+                quote,
+                self.limit_price,
+                self.minimum_shares,
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Replays a deduplicated compact quote after a process restart or backfill.
+    pub fn process_compact_quote(&mut self, payload: &Value, received_at_ms: i64) -> bool {
+        let Some(outcome) = payload
+            .get("outcome")
+            .and_then(Value::as_str)
+            .and_then(normalize_outcome)
+        else {
+            return false;
+        };
+        let Some(quote) = quote_from_compact_payload(payload, received_at_ms) else {
+            return false;
+        };
+        if let Some(tracker) = self.trackers.get_mut(outcome) {
+            tracker.observe(quote, self.limit_price, self.minimum_shares);
+            return true;
+        }
+        false
+    }
+
     pub fn set_order_candidate(&mut self, prediction: &str, amount_usdc: f64) {
         let Some(outcome) = normalize_outcome(prediction) else {
             return;
@@ -610,7 +657,7 @@ impl SessionAnalyzer {
             record_type: "SESSION_METRICS".to_string(),
             generated_at: Utc::now(),
             source_format: context.source_format,
-            analysis_complete: true,
+            analysis_complete: context.analysis_complete,
             session_id: context.session_id,
             market_slot: context.market_slot,
             entry_time_ms: context.entry_time_ms,
@@ -671,6 +718,19 @@ impl SessionAnalyzer {
             events.push(compact_quote_event(outcome, asset_id, "quote", &quote));
         }
     }
+}
+
+fn quote_from_compact_payload(payload: &Value, observed_at_unix_ms: i64) -> Option<QuoteSnapshot> {
+    payload.get("outcome").and_then(Value::as_str)?;
+    Some(QuoteSnapshot {
+        observed_at_unix_ms,
+        best_bid: numeric(payload.get("best_bid")),
+        best_bid_size: numeric(payload.get("best_bid_size")),
+        best_ask: numeric(payload.get("best_ask")),
+        best_ask_size: numeric(payload.get("best_ask_size")),
+        ask_shares_at_or_below_limit: numeric(payload.get("ask_shares_at_or_below_limit")),
+        last_trade_price: numeric(payload.get("last_trade_price")),
+    })
 }
 
 fn compact_quote_event(
@@ -831,6 +891,7 @@ mod tests {
         );
         let metrics = analyzer.finish(SessionMetricContext {
             source_format: "test".to_string(),
+            analysis_complete: true,
             session_id: "session".to_string(),
             market_slot: "btc_5m".to_string(),
             entry_time_ms: 1_000,
@@ -873,6 +934,7 @@ mod tests {
         analyzer.set_order_candidate("DOWN", 2.50);
         let metrics = analyzer.finish(SessionMetricContext {
             source_format: "test".to_string(),
+            analysis_complete: true,
             session_id: "session".to_string(),
             market_slot: "eth_5m".to_string(),
             entry_time_ms: 1_000,
@@ -910,5 +972,60 @@ mod tests {
         });
         assert_eq!(analyzer.process_payload(&payload, 1_000).len(), 1);
         assert!(analyzer.process_payload(&payload, 1_001).is_empty());
+    }
+
+    #[test]
+    fn compact_snapshots_rebuild_fill_metrics_after_restart() {
+        let mut analyzer = analyzer();
+        assert!(analyzer.activate_from_compact_snapshot(
+            "UP",
+            ["signal-1".to_string()],
+            1_000,
+            &json!({
+                "outcome":"UP",
+                "asset_id":"up-token",
+                "best_bid":0.48,
+                "best_ask":0.50,
+                "ask_shares_at_or_below_limit":4.0
+            }),
+        ));
+        assert!(analyzer.process_compact_quote(
+            &json!({
+                "outcome":"UP",
+                "asset_id":"up-token",
+                "best_bid":0.49,
+                "best_ask":0.50,
+                "ask_shares_at_or_below_limit":6.0
+            }),
+            1_250,
+        ));
+        analyzer.set_order_candidate("UP", 2.50);
+
+        let metrics = analyzer.finish(SessionMetricContext {
+            source_format: "test-resume".to_string(),
+            analysis_complete: true,
+            session_id: "session".to_string(),
+            market_slot: "btc_5m".to_string(),
+            entry_time_ms: 1_000,
+            slug: "slug".to_string(),
+            winning_asset_id: Some("up-token".to_string()),
+            winning_outcome: Some("Up".to_string()),
+            raw_stream_path: None,
+            completion_status: "RESOLVED_WITH_GAPS".to_string(),
+            gap_count: 1,
+            reconnect_count: 0,
+        });
+        let up = metrics
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome == "UP")
+            .unwrap();
+        assert_eq!(
+            up.first_minimum_fillable
+                .as_ref()
+                .map(|fill| fill.elapsed_from_signal_ms),
+            Some(250)
+        );
+        assert_eq!(up.order_fill_result, "WIN");
     }
 }
