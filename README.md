@@ -248,6 +248,9 @@ Le recorder forward reconstruit le carnet en memoire et ne conserve que les chan
 du meilleur bid/ask, la profondeur disponible a `0,50`, les trades et les evenements de cycle de
 vie. A la fin de chaque session, il ecrit les metriques permanentes avant de supprimer le flux
 compact si `PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
+Apres un redemarrage, l'etat analytique est reconstruit depuis le flux compact et le sizing
+durable. Si cette reprise ne peut pas etre validee integralement, la metrique est marquee
+incomplete et le flux reste conserve jusqu'a un `backfill` reussi.
 
 Pour convertir les anciennes sessions brutes, produire le rapport, puis recuperer l'espace :
 

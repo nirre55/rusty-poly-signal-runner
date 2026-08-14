@@ -229,6 +229,7 @@ fn backfill(logs_dir: &Path) -> Result<()> {
     let metrics_path = logs_dir.join("session_metrics.jsonl");
     let mut completed = load_metrics(&metrics_path)?
         .into_iter()
+        .filter(|metric| metric.analysis_complete)
         .map(|metric| metric.session_id)
         .collect::<BTreeSet<_>>();
     let signals_by_session = group_signals_by_session(signals);
@@ -259,8 +260,11 @@ fn backfill(logs_dir: &Path) -> Result<()> {
         }
         let metric = backfill_session(session, &session_signals, &candidate_amounts, &stream_path)
             .with_context(|| format!("backfill session {}", session.session_id))?;
+        let analysis_complete = metric.analysis_complete;
         append_jsonl(&metrics_path, &metric)?;
-        completed.insert(session.session_id.clone());
+        if analysis_complete {
+            completed.insert(session.session_id.clone());
+        }
         generated += 1;
         println!(
             "BACKFILLED\t{}\t{}\t{}",
@@ -302,26 +306,69 @@ fn backfill_session(
 
     let file = fs::File::open(stream_path)
         .with_context(|| format!("lecture stream {}", stream_path.display()))?;
-    let mut activated = false;
+    let mut activated_predictions = BTreeSet::new();
+    let mut saw_compact_quotes = false;
     for line in BufReader::new(file).lines() {
         let line = line?;
         let Ok(envelope) = serde_json::from_str::<StreamEnvelope>(&line) else {
             continue;
         };
-        if envelope.event_type == "signal_activated" && !activated {
-            for (prediction, signal_ids) in &groups {
-                analyzer.activate(
+        match envelope.event_type.as_str() {
+            "signal_snapshot" => {
+                saw_compact_quotes = true;
+                let Some(prediction) = envelope.payload.get("outcome").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let signal_ids = groups
+                    .get(&prediction.to_ascii_uppercase())
+                    .cloned()
+                    .unwrap_or_default();
+                if analyzer.activate_from_compact_snapshot(
                     prediction,
-                    signal_ids.iter().cloned(),
+                    signal_ids,
                     envelope.received_at_unix_ms,
-                );
+                    &envelope.payload,
+                ) {
+                    activated_predictions.insert(prediction.to_ascii_uppercase());
+                }
             }
-            activated = true;
+            "quote" => {
+                saw_compact_quotes = true;
+                analyzer.process_compact_quote(&envelope.payload, envelope.received_at_unix_ms);
+            }
+            "order_candidate" => {
+                if let (Some(prediction), Some(amount_usdc)) = (
+                    envelope.payload.get("prediction").and_then(Value::as_str),
+                    envelope.payload.get("amount_usdc").and_then(Value::as_f64),
+                ) {
+                    analyzer.set_order_candidate(prediction, amount_usdc);
+                }
+            }
+            "signal_activated" => {
+                for (prediction, signal_ids) in &groups {
+                    if activated_predictions.contains(prediction) {
+                        continue;
+                    }
+                    analyzer.activate(
+                        prediction,
+                        signal_ids.iter().cloned(),
+                        envelope.received_at_unix_ms,
+                    );
+                    activated_predictions.insert(prediction.clone());
+                }
+            }
+            _ => {
+                analyzer.process_payload(&envelope.payload, envelope.received_at_unix_ms);
+            }
         }
-        analyzer.process_payload(&envelope.payload, envelope.received_at_unix_ms);
     }
-    if !activated {
+    let replay_complete = activated_predictions.len() == groups.len();
+    if activated_predictions.len() < groups.len() {
         for (prediction, signal_ids) in &groups {
+            if activated_predictions.contains(prediction) {
+                continue;
+            }
             let detected_at = signals
                 .iter()
                 .filter(|signal| signal.prediction.eq_ignore_ascii_case(prediction))
@@ -333,7 +380,12 @@ fn backfill_session(
     }
 
     Ok(analyzer.finish(SessionMetricContext {
-        source_format: "backfill_raw_v1".to_string(),
+        source_format: if saw_compact_quotes {
+            "backfill_compact_v2".to_string()
+        } else {
+            "backfill_raw_v1".to_string()
+        },
+        analysis_complete: replay_complete,
         session_id: session.session_id.clone(),
         market_slot: session.market_slot.clone(),
         entry_time_ms: session.entry_time_ms,
@@ -354,7 +406,10 @@ fn backfill_session(
 }
 
 fn report(logs_dir: &Path) -> Result<()> {
-    let metrics = load_metrics(&logs_dir.join("session_metrics.jsonl"))?;
+    let metrics = load_metrics(&logs_dir.join("session_metrics.jsonl"))?
+        .into_iter()
+        .filter(|metric| metric.analysis_complete)
+        .collect::<Vec<_>>();
     let signals = load_signals(&logs_dir.join("signals.jsonl"))?;
     let signal_index = signals
         .into_iter()
@@ -520,13 +575,18 @@ fn verify(logs_dir: &Path) -> Result<()> {
     let raw_bytes = directory_size(&logs_dir.join("streams"))?;
     let metric_ids = metrics
         .iter()
+        .filter(|metric| metric.analysis_complete)
         .map(|metric| metric.session_id.as_str())
         .collect::<BTreeSet<_>>();
+    let incomplete_metrics = metrics
+        .iter()
+        .filter(|metric| !metric.analysis_complete)
+        .count();
     let finalized_without_metrics = sessions
         .keys()
         .filter(|session_id| !metric_ids.contains(session_id.as_str()))
         .count();
-    println!("VERIFY\tsessions={}\tmetrics={}\tactive={}\traw_files={}\traw_gib={:.3}\tfinalized_without_metrics={}", sessions.len(), metrics.len(), active.len(), raw_files, raw_bytes as f64 / 1_073_741_824.0, finalized_without_metrics);
+    println!("VERIFY\tsessions={}\tmetrics={}\tincomplete_metrics={}\tactive={}\traw_files={}\traw_gib={:.3}\tfinalized_without_metrics={}", sessions.len(), metric_ids.len(), incomplete_metrics, active.len(), raw_files, raw_bytes as f64 / 1_073_741_824.0, finalized_without_metrics);
     Ok(())
 }
 
