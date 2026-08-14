@@ -25,6 +25,14 @@ pub struct QuoteSnapshot {
     pub observed_at_unix_ms: i64,
     pub best_bid: Option<f64>,
     pub best_bid_size: Option<f64>,
+    #[serde(default)]
+    pub bid_shares_available: Option<f64>,
+    #[serde(default)]
+    pub sell_vwap_5: Option<f64>,
+    #[serde(default)]
+    pub sell_vwap_candidate: Option<f64>,
+    #[serde(default)]
+    pub candidate_shares: Option<f64>,
     pub best_ask: Option<f64>,
     pub best_ask_size: Option<f64>,
     pub ask_shares_at_or_below_limit: Option<f64>,
@@ -191,7 +199,12 @@ impl TokenBook {
         self.advertised_best_ask = numeric(payload.get("best_ask"));
     }
 
-    fn quote(&self, observed_at_unix_ms: i64, limit_price: f64) -> QuoteSnapshot {
+    fn quote(
+        &self,
+        observed_at_unix_ms: i64,
+        limit_price: f64,
+        candidate_shares: Option<f64>,
+    ) -> QuoteSnapshot {
         let book_best_bid = self.bids.last_key_value();
         let book_best_ask = self.asks.first_key_value();
         let best_bid = self
@@ -202,6 +215,9 @@ impl TokenBook {
             .or_else(|| book_best_ask.map(|(price, _)| from_price_key(*price)));
         let best_bid_size = best_bid.and_then(|price| self.bids.get(&to_price_key(price)).copied());
         let best_ask_size = best_ask.and_then(|price| self.asks.get(&to_price_key(price)).copied());
+        let bid_shares_available = self
+            .has_book_snapshot
+            .then(|| self.bids.values().copied().sum());
         let ask_shares_at_or_below_limit = self.has_book_snapshot.then(|| {
             self.asks
                 .range(..=to_price_key(limit_price))
@@ -212,11 +228,32 @@ impl TokenBook {
             observed_at_unix_ms,
             best_bid,
             best_bid_size,
+            bid_shares_available,
+            sell_vwap_5: self.sell_vwap(5.0),
+            sell_vwap_candidate: candidate_shares.and_then(|shares| self.sell_vwap(shares)),
+            candidate_shares,
             best_ask,
             best_ask_size,
             ask_shares_at_or_below_limit,
             last_trade_price: self.last_trade_price,
         }
+    }
+
+    fn sell_vwap(&self, shares: f64) -> Option<f64> {
+        if !self.has_book_snapshot || shares <= 0.0 {
+            return None;
+        }
+        let mut remaining = shares;
+        let mut proceeds = 0.0;
+        for (price, available) in self.bids.iter().rev() {
+            let filled = remaining.min(*available);
+            proceeds += filled * from_price_key(*price);
+            remaining -= filled;
+            if remaining <= 1e-9 {
+                return Some(proceeds / shares);
+            }
+        }
+        None
     }
 }
 
@@ -312,6 +349,12 @@ impl OutcomeTracker {
             first_fully_fillable: first,
             immediate_fak_fillable: immediate,
         });
+    }
+
+    fn required_shares(&self) -> Option<f64> {
+        self.order_candidate
+            .as_ref()
+            .map(|candidate| candidate.required_shares)
     }
 
     fn observe(&mut self, quote: QuoteSnapshot, limit_price: f64, minimum_shares: f64) {
@@ -517,7 +560,14 @@ impl SessionAnalyzer {
     ) -> Option<CompactEvent> {
         let outcome = normalize_outcome(prediction)?;
         let token_id = self.token_id(outcome).to_string();
-        let quote = self.books.get(&token_id)?.quote(at_ms, self.limit_price);
+        let candidate_shares = self
+            .trackers
+            .get(outcome)
+            .and_then(OutcomeTracker::required_shares);
+        let quote = self
+            .books
+            .get(&token_id)?
+            .quote(at_ms, self.limit_price, candidate_shares);
         self.trackers.get_mut(outcome)?.activate(
             signal_ids,
             at_ms,
@@ -704,7 +754,11 @@ impl SessionAnalyzer {
         let Some(book) = self.books.get(asset_id) else {
             return;
         };
-        let quote = book.quote(received_at_ms, self.limit_price);
+        let candidate_shares = self
+            .trackers
+            .get(outcome)
+            .and_then(OutcomeTracker::required_shares);
+        let quote = book.quote(received_at_ms, self.limit_price, candidate_shares);
         if let Some(tracker) = self.trackers.get_mut(outcome) {
             tracker.observe(quote.clone(), self.limit_price, self.minimum_shares);
         }
@@ -723,9 +777,16 @@ impl SessionAnalyzer {
 fn quote_from_compact_payload(payload: &Value, observed_at_unix_ms: i64) -> Option<QuoteSnapshot> {
     payload.get("outcome").and_then(Value::as_str)?;
     Some(QuoteSnapshot {
-        observed_at_unix_ms,
+        observed_at_unix_ms: payload
+            .get("observed_at_unix_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(observed_at_unix_ms),
         best_bid: numeric(payload.get("best_bid")),
         best_bid_size: numeric(payload.get("best_bid_size")),
+        bid_shares_available: numeric(payload.get("bid_shares_available")),
+        sell_vwap_5: numeric(payload.get("sell_vwap_5")),
+        sell_vwap_candidate: numeric(payload.get("sell_vwap_candidate")),
+        candidate_shares: numeric(payload.get("candidate_shares")),
         best_ask: numeric(payload.get("best_ask")),
         best_ask_size: numeric(payload.get("best_ask_size")),
         ask_shares_at_or_below_limit: numeric(payload.get("ask_shares_at_or_below_limit")),
@@ -746,8 +807,13 @@ fn compact_quote_event(
         payload: json!({
             "outcome": outcome,
             "asset_id": asset_id,
+            "observed_at_unix_ms": quote.observed_at_unix_ms,
             "best_bid": quote.best_bid,
             "best_bid_size": quote.best_bid_size,
+            "bid_shares_available": quote.bid_shares_available,
+            "sell_vwap_5": quote.sell_vwap_5,
+            "sell_vwap_candidate": quote.sell_vwap_candidate,
+            "candidate_shares": quote.candidate_shares,
             "best_ask": quote.best_ask,
             "best_ask_size": quote.best_ask_size,
             "ask_shares_at_or_below_limit": quote.ask_shares_at_or_below_limit,
@@ -759,6 +825,10 @@ fn compact_quote_event(
 fn quote_values_changed(previous: &QuoteSnapshot, current: &QuoteSnapshot) -> bool {
     previous.best_bid != current.best_bid
         || previous.best_bid_size != current.best_bid_size
+        || previous.bid_shares_available != current.bid_shares_available
+        || previous.sell_vwap_5 != current.sell_vwap_5
+        || previous.sell_vwap_candidate != current.sell_vwap_candidate
+        || previous.candidate_shares != current.candidate_shares
         || previous.best_ask != current.best_ask
         || previous.best_ask_size != current.best_ask_size
         || previous.ask_shares_at_or_below_limit != current.ask_shares_at_or_below_limit

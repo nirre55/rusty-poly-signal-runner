@@ -16,3 +16,6 @@ pub mod tracker;
 pub mod trade_timing;
 pub mod trading_filter;
 pub mod trading_runtime;
+pub mod trajectory;
+pub mod trajectory_analysis;
+pub mod trajectory_reports;

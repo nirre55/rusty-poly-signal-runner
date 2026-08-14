@@ -165,6 +165,7 @@ async fn main() -> Result<()> {
             config.clone(),
             market,
             enabled.clone(),
+            recorder.clone(),
             tx.clone(),
         ));
     }
@@ -187,9 +188,6 @@ async fn main() -> Result<()> {
         tokio::select! {
             Some(event) = rx.recv() => {
                 if let Some(recorder) = recorder.as_ref() {
-                    recorder
-                        .record_binance_candle(event.feed.market, &event.candle)
-                        .await;
                     if let Err(error) = recorder
                         .record_signals(
                             event.feed.entry_time_ms,
@@ -276,6 +274,7 @@ async fn run_feed(
     base_config: Config,
     market: MarketSlot,
     enabled: EnabledStrategies,
+    recorder: Option<SignalMarketRecorder>,
     tx: mpsc::Sender<FeedCandleEvent>,
 ) {
     let mut strategies = FeedStrategies::default();
@@ -301,12 +300,20 @@ async fn run_feed(
         let symbol = market.symbol().to_string();
         let interval = market.interval().to_string();
         tokio::spawn(async move {
-            if let Err(error) = binance::stream_candles(&url, &symbol, &interval, candle_tx).await {
+            if let Err(error) =
+                binance::stream_candle_updates(&url, &symbol, &interval, candle_tx).await
+            {
                 warn!("Flux Binance {} interrompu: {error:#}", market.key());
             }
         });
 
         while let Some(candle) = candle_rx.recv().await {
+            if let Some(recorder) = recorder.as_ref() {
+                recorder.record_binance_candle(market, &candle).await;
+            }
+            if !candle.is_closed {
+                continue;
+            }
             let signals = strategies.evaluate(&candle, market, &enabled);
             if !signals.is_empty() {
                 info!(

@@ -239,6 +239,10 @@ Fichiers produits :
 | `session_metrics.jsonl` | Metriques permanentes de touch/fill a 0,50, profondeur, delais, prix et resultat. |
 | `stats_summary.json` | Rapport agrege regenerable par strategie et par marche. |
 | `stats/*.json` | Compteurs minimaux globaux, majoritaires et par strategie. |
+| `trajectories/YYYY-MM-DD/*.jsonl.zst` | Trajectoires compactes Polymarket/Binance, conservees pour les backtests. |
+| `trajectory_index.jsonl` | Index, checksum et taille de chaque trajectoire finalisee. |
+| `stats/temporal/*.json` | Delais de passage strict sous 0,50 et contexte au signal. |
+| `stats/risk/*.json` | MAE/MFE, drawdown et sorties hypothetiques apres entree. |
 | `stream_cleanup.jsonl` | Audit des flux bruts supprimes apres validation des metriques. |
 
 Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
@@ -247,8 +251,9 @@ Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
 
 Le recorder forward reconstruit le carnet en memoire et ne conserve que les changements utiles
 du meilleur bid/ask, la profondeur disponible a `0,50`, les trades et les evenements de cycle de
-vie. A la fin de chaque session, il ecrit les metriques permanentes avant de supprimer le flux
-compact si `PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
+vie. A la fin de chaque session, il ecrit les metriques permanentes, compresse et verifie la
+trajectoire, met a jour son index, puis seulement supprime le flux brut si
+`PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
 Apres un redemarrage, l'etat analytique est reconstruit depuis le flux compact et le sizing
 durable. Si cette reprise ne peut pas etre validee integralement, la metrique est marquee
 incomplete et le flux reste conserve jusqu'a un `backfill` reussi.
@@ -262,12 +267,23 @@ chmod +x meche050_recorder_stats.sh
 ./meche050_recorder_stats.sh purge
 ./meche050_recorder_stats.sh purge --confirm
 ./meche050_recorder_stats.sh verify
+./meche050_recorder_stats.sh repair-index
 ```
 
 La premiere commande `purge` est toujours une simulation. La suppression exige `--confirm`,
 ignore les sessions actives et refuse tout fichier situe hors de `logs/meche050-forward/streams`.
+Lorsque `PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES=true`, le flux brut reste intact tant que sa
+trajectoire compressee n'existe pas ou ne passe pas la verification d'integrite.
 Les fichiers `signals.jsonl`, `signal_sizing.jsonl`, `sessions.jsonl`, `session_metrics.jsonl` et
 `stats_summary.json` ne sont jamais supprimes.
+La commande `purge` ne supprime pas les trajectoires compressees. `verify` valide leur taille,
+checksum, decompression et nombre d'observations. `repair-index` reconstruit explicitement les
+entrees manquantes apres validation; si une compression interrompue a laisse uniquement le flux
+brut, il recree d'abord la trajectoire sans supprimer ce flux source.
+
+Le script charge par defaut `configs/meche050_forward.env`, ce qui inscrit les hypotheses de frais,
+slippage et taille minimale d'echantillon dans les rapports. Un autre fichier peut etre fourni avec
+`MECHE050_STATS_CONFIG=/chemin/config.env`.
 
 Le rapport distingue `immediate_fak_fills` (liquidite suffisante au moment du signal) et
 `resting_limit_fills` (liquidite suffisante plus tard a `0,50`). La ligne `unique_orders` represente
@@ -279,6 +295,102 @@ La commande `report` regenere aussi `stats/global_all_signals.json`,
 un passage sous `0,50` exige un meilleur ask strictement inferieur a `0,50`; un ask egal a `0,50`
 ne compte pas. Le rapport majoritaire retient la direction ayant le plus de votes et compte les
 egalites dans `trades_ignored_tie` sans creer de trade.
+
+### Design valide : trajectoires compactes et statistiques temporelles
+
+Cette extension enrichit uniquement l'observation du forward test dry-run. Elle ne modifie ni les
+signaux, ni le sizing, ni les ordres, ni les sorties de position. Son objectif est de conserver un
+jeu de donnees suffisamment precis pour rechercher et valider plus tard des filtres d'entree et des
+regles de sortie sans biais temporel.
+
+#### Collecte et stockage
+
+Une seule trajectoire est conservee par marche et fenetre ayant au moins un signal, meme lorsque
+plusieurs strategies votent. Elle reference tous les identifiants de signaux et leur direction. La
+courte periode pre-signal disponible dans le recorder est ajoutee lors de l'activation, puis chaque
+changement significatif est enregistre jusqu'a la resolution.
+Un changement significatif correspond a la modification d'au moins un champ de marche liste
+ci-dessous ; deux etats consecutifs identiques sont dedupliques sans echantillonnage temporel.
+
+Chaque observation contient au minimum :
+
+- l'horodatage, le temps depuis le signal et le temps restant avant resolution ;
+- les meilleurs bid/ask, leurs tailles, le spread et la liquidite utile pour UP et DOWN ;
+- les quantites achetables a `0,50` et les VWAP de revente pour 5 shares et pour le sizing candidat ;
+- le dernier prix echange Polymarket ;
+- le prix Binance, le prix d'ouverture de la fenetre et leur variation relative ;
+- l'etat des connexions, les numeros de sequence, les reconnexions et les trous detectes.
+
+Les fichiers finalises sont compresses et indexes :
+
+```text
+logs/meche050-forward/trajectories/YYYY-MM-DD/<session_id>.jsonl.zst
+logs/meche050-forward/trajectory_index.jsonl
+```
+
+Une trajectoire active reste recuperable apres redemarrage. Sa finalisation ecrit d'abord un fichier
+temporaire, valide sa decompression et son nombre d'observations, puis effectue un renommage atomique
+avant d'ajouter une entree idempotente a l'index. `verify` detecte une entree d'index manquante et
+`repair-index` la reconstruit explicitement, y compris si la compression a reussi avant une panne de
+l'index. Les trajectoires sont conservees jusqu'a une purge manuelle ; aucune suppression
+automatique n'est autorisee. La commande `verify` signale les fichiers absents, incomplets ou
+corrompus ainsi que l'espace occupe.
+
+#### Statistiques temporelles d'entree
+
+Les six rapports minimaux existants gardent exactement leur schema. Six rapports separes sont
+generes sous `stats/temporal/` pour `global_all_signals`, `global_majority` et les quatre strategies.
+Chaque rapport fournit une vue globale et des ventilations par marche, direction et resultat.
+
+Le temps d'entree commence a la detection du signal et se termine a la premiere observation dont le
+meilleur ask est strictement inferieur a `0,50`. Une observation egale a `0,50` ne constitue jamais
+un passage. Les rapports contiennent :
+
+- signaux analysables, passages, non-passages et passages immediats ;
+- moyenne, mediane, minimum, maximum et percentiles P25, P75, P90 et P95 ;
+- passages avant 15 s, 30 s, 60 s, 120 s, 180 s et 300 s ;
+- distributions separees pour les gains et les pertes ;
+- ask, spread, profondeur et distance a `0,50` au moment du signal.
+
+Le rapport majoritaire applique la regle existante : UP si les votes UP sont plus nombreux, DOWN si
+les votes DOWN sont plus nombreux, et egalite ignoree avec compteur separe.
+
+#### Statistiques de risque apres entree
+
+Le premier passage strict sous `0,50` definit une entree hypothetique a `0,50`. Les six rapports sous
+`stats/risk/` observent ensuite la position a 15 s, 30 s, 60 s, 120 s, 180 s et 300 s apres cette
+entree. Un horizon situe apres la resolution est compte comme indisponible et n'est pas remplace par
+la derniere observation. Le prix de sortie est fonde sur le bid executable, jamais sur l'ask.
+
+Les rapports incluent :
+
+- meilleur bid, spread, profondeur, VWAP de sortie et PnL hypothetique pour 5 shares ;
+- mouvement Binance signe dans le sens de la prediction et temps restant ;
+- MAE, MFE, drawdown depuis le meilleur prix et leurs horodatages ;
+- premier passage et duree sous `0,45`, `0,40`, `0,35` et `0,30` ;
+- premier passage au-dessus de `0,55`, `0,60`, `0,65` et `0,70` ;
+- recuperations apres baisse, pertes evitees et gains sacrifies par sortie hypothetique ;
+- EV de conservation jusqu'a resolution, EV de sortie au bid et difference entre les deux, en brut
+  et en net avec les hypotheses de frais et de slippage inscrites dans chaque rapport.
+
+Chaque groupe publie sa taille d'echantillon, son taux de perte et un intervalle de confiance. Les
+resultats sont ventiles par strategie, marche, direction et nombre de votes concordants. Par defaut,
+un groupe de moins de 30 observations completes produit un avertissement et ne devient jamais une
+recommandation ; le seuil utilise est inscrit dans chaque rapport.
+
+#### Qualite, anti-lookahead et tests
+
+Une session incomplete ou contenant un trou de donnees n'est jamais classee silencieusement comme
+un non-passage. Elle est conservee mais exclue des distributions principales et comptee dans une
+categorie de qualite distincte. Les futures simulations de sortie n'utiliseront que les informations
+disponibles a l'instant de la decision ; le resultat final sert uniquement d'etiquette. Toute regle
+candidate devra ensuite etre validee chronologiquement sur une periode hors echantillon, avec EV
+nette et drawdown comme criteres principaux.
+
+Les tests couvrent le seuil strict (`0,49` accepte, `0,50` refuse), les percentiles, les horizons
+relatifs au fill, le partage d'une trajectoire entre strategies, les trous de donnees, la profondeur,
+la reprise apres redemarrage, la compression, l'index et la finalisation atomique. Les rapports sont
+deterministes et ecrits atomiquement.
 
 ## Reconciliation officielle Polymarket
 
