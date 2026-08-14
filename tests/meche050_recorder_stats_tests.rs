@@ -243,6 +243,178 @@ fn incomplete_resume_metrics_are_rebuilt_from_compact_stream() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn report_writes_strict_crossing_strategy_and_majority_files() {
+    let root = std::env::temp_dir().join(format!(
+        "meche050-minimal-stats-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let logs = root.join("logs");
+    let tie_up = ["btc_5m:1000:boll_fade:up", "btc_5m:1000:trio_vote2:up"];
+    let tie_down = [
+        "btc_5m:1000:streak_rsi:down",
+        "btc_5m:1000:reversal_pro:down",
+    ];
+    let majority_up = ["eth_5m:2000:boll_fade:up", "eth_5m:2000:trio_vote2:up"];
+    let minority_down = ["eth_5m:2000:streak_rsi:down"];
+
+    write_jsonl(
+        &logs.join("session_metrics.jsonl"),
+        &[
+            metric_record("session-tie", 1_000, &tie_up, &tie_down, 0.49, 0.49),
+            metric_record(
+                "session-majority",
+                2_000,
+                &majority_up,
+                &minority_down,
+                0.49,
+                0.50,
+            ),
+        ],
+    );
+    let signals = tie_up
+        .iter()
+        .chain(&tie_down)
+        .map(|signal_id| signal_record("session-tie", signal_id))
+        .chain(
+            majority_up
+                .iter()
+                .chain(&minority_down)
+                .map(|signal_id| signal_record("session-majority", signal_id)),
+        )
+        .collect::<Vec<_>>();
+    write_jsonl(&logs.join("signals.jsonl"), &signals);
+
+    run(&logs, &["report"]);
+
+    assert_eq!(
+        read_json(&logs.join("stats/global_all_signals.json")),
+        json!({
+            "total_signals":7,
+            "trades_below_0_50":6,
+            "wins_below_0_50":4,
+            "losses_below_0_50":2,
+            "missed_wins_no_below_0_50":0,
+            "missed_losses_no_below_0_50":1
+        })
+    );
+    assert_eq!(
+        read_json(&logs.join("stats/global_majority.json")),
+        json!({
+            "total_signals":1,
+            "trades_below_0_50":1,
+            "wins_below_0_50":1,
+            "losses_below_0_50":0,
+            "missed_wins_no_below_0_50":0,
+            "missed_losses_no_below_0_50":0,
+            "trades_ignored_tie":1
+        })
+    );
+    assert_eq!(
+        read_json(&logs.join("stats/streak_rsi.json")),
+        json!({
+            "total_signals":2,
+            "trades_below_0_50":1,
+            "wins_below_0_50":0,
+            "losses_below_0_50":1,
+            "missed_wins_no_below_0_50":0,
+            "missed_losses_no_below_0_50":1
+        })
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn metric_record(
+    session_id: &str,
+    entry_time_ms: i64,
+    up_signal_ids: &[&str],
+    down_signal_ids: &[&str],
+    up_minimum_ask: f64,
+    down_minimum_ask: f64,
+) -> Value {
+    json!({
+        "schema_version":2,
+        "record_type":"SESSION_METRICS",
+        "generated_at":"1970-01-01T00:00:03Z",
+        "source_format":"test",
+        "analysis_complete":true,
+        "session_id":session_id,
+        "market_slot":"btc_5m",
+        "entry_time_ms":entry_time_ms,
+        "slug":session_id,
+        "limit_price":0.5,
+        "minimum_shares":5.0,
+        "completion_status":"RESOLVED_COMPLETE",
+        "gap_count":0,
+        "reconnect_count":0,
+        "resolution_winning_asset_id":"up-token",
+        "resolution_winning_outcome":"UP",
+        "outcomes":[
+            outcome_record("DOWN", "down-token", down_signal_ids, down_minimum_ask, false),
+            outcome_record("UP", "up-token", up_signal_ids, up_minimum_ask, true)
+        ],
+        "raw_stream_path":null
+    })
+}
+
+fn outcome_record(
+    outcome: &str,
+    token_id: &str,
+    signal_ids: &[&str],
+    minimum_ask: f64,
+    winning_outcome: bool,
+) -> Value {
+    json!({
+        "outcome":outcome,
+        "token_id":token_id,
+        "signal_ids":signal_ids,
+        "signal_at_unix_ms":1_000,
+        "quote_at_signal":null,
+        "quote_observation_count":1,
+        "first_limit_touch":null,
+        "first_minimum_fillable":null,
+        "immediate_limit_touch":false,
+        "immediate_minimum_fillable":false,
+        "order_candidate":null,
+        "min_best_ask":{
+            "observed_at_unix_ms":1_100,
+            "elapsed_from_signal_ms":100,
+            "value":minimum_ask
+        },
+        "max_best_ask":null,
+        "min_best_bid":null,
+        "max_best_bid":null,
+        "max_fillable_shares_at_limit":null,
+        "checkpoints":{},
+        "last_quote":null,
+        "winning_outcome":winning_outcome,
+        "minimum_fill_result":"NOT_FILLED",
+        "minimum_fill_pnl_usdc":0.0,
+        "order_fill_result":"NO_ORDER_CANDIDATE",
+        "order_fill_pnl_usdc":null
+    })
+}
+
+fn signal_record(session_id: &str, signal_id: &str) -> Value {
+    let mut parts = signal_id.rsplit(':');
+    let prediction = parts.next().unwrap().to_ascii_uppercase();
+    let strategy = parts.next().unwrap();
+    json!({
+        "signal_id":signal_id,
+        "session_id":session_id,
+        "strategy":strategy,
+        "market_slot":"btc_5m",
+        "prediction":prediction,
+        "detected_at_local":"1970-01-01T00:00:01Z"
+    })
+}
+
+fn read_json(path: &std::path::Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
 fn envelope(received_at_unix_ms: i64, event_type: &str, payload: Value) -> Value {
     json!({
         "received_at_unix_ms":received_at_unix_ms,

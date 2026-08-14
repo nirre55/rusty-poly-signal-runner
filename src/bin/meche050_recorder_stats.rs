@@ -9,11 +9,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use rusty_poly_signal_runner::recorder_metrics::{
-    SessionAnalyzer, SessionMetricContext, SessionMetricsRecord,
+    OutcomeMetrics, SessionAnalyzer, SessionMetricContext, SessionMetricsRecord,
 };
 
 const FIXED_LIMIT_PRICE: f64 = 0.50;
 const MINIMUM_SHARES: f64 = 5.0;
+const STRATEGY_NAMES: [&str; 4] = ["boll_fade", "streak_rsi", "trio_vote2", "reversal_pro"];
 
 #[derive(Debug)]
 struct Cli {
@@ -173,6 +174,70 @@ struct ReportRow {
     win_rate_pct: f64,
     ev_usdc_per_candidate: f64,
     average_fill_seconds: f64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, PartialEq, Eq)]
+struct MinimalStats {
+    total_signals: u64,
+    trades_below_0_50: u64,
+    wins_below_0_50: u64,
+    losses_below_0_50: u64,
+    missed_wins_no_below_0_50: u64,
+    missed_losses_no_below_0_50: u64,
+}
+
+impl MinimalStats {
+    fn add_outcome(&mut self, outcome: &OutcomeMetrics) {
+        self.total_signals += 1;
+        let minimum_best_ask = outcome.min_best_ask.as_ref().map(|minimum| minimum.value);
+        let crossed_below = is_strictly_below_0_50(minimum_best_ask);
+        if crossed_below {
+            self.trades_below_0_50 += 1;
+        }
+        match (crossed_below, outcome.winning_outcome) {
+            (true, Some(true)) => self.wins_below_0_50 += 1,
+            (true, Some(false)) => self.losses_below_0_50 += 1,
+            (false, Some(true)) => self.missed_wins_no_below_0_50 += 1,
+            (false, Some(false)) => self.missed_losses_no_below_0_50 += 1,
+            (_, None) => {}
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, PartialEq, Eq)]
+struct MajorityStats {
+    #[serde(flatten)]
+    stats: MinimalStats,
+    trades_ignored_tie: u64,
+}
+
+struct MinimalReports {
+    global_all_signals: MinimalStats,
+    global_majority: MajorityStats,
+    by_strategy: BTreeMap<String, MinimalStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MajorityVote {
+    Up,
+    Down,
+    Tie,
+    NoSignals,
+}
+
+fn is_strictly_below_0_50(minimum_best_ask: Option<f64>) -> bool {
+    minimum_best_ask.is_some_and(|price| price < FIXED_LIMIT_PRICE)
+}
+
+fn majority_vote(up_votes: usize, down_votes: usize) -> MajorityVote {
+    if up_votes + down_votes == 0 {
+        return MajorityVote::NoSignals;
+    }
+    match up_votes.cmp(&down_votes) {
+        std::cmp::Ordering::Greater => MajorityVote::Up,
+        std::cmp::Ordering::Less => MajorityVote::Down,
+        std::cmp::Ordering::Equal => MajorityVote::Tie,
+    }
 }
 
 fn main() -> Result<()> {
@@ -500,7 +565,88 @@ fn report(logs_dir: &Path) -> Result<()> {
             "rows": report_rows,
         }),
     )?;
+    write_minimal_reports(logs_dir, &metrics, &signal_index)?;
     Ok(())
+}
+
+fn write_minimal_reports(
+    logs_dir: &Path,
+    metrics: &[SessionMetricsRecord],
+    signal_index: &BTreeMap<String, SignalRecord>,
+) -> Result<()> {
+    let reports = build_minimal_reports(metrics, signal_index);
+    let stats_dir = logs_dir.join("stats");
+    atomic_write_json(
+        &stats_dir.join("global_all_signals.json"),
+        &reports.global_all_signals,
+    )?;
+    atomic_write_json(
+        &stats_dir.join("global_majority.json"),
+        &reports.global_majority,
+    )?;
+    for strategy in STRATEGY_NAMES {
+        let stats = reports
+            .by_strategy
+            .get(strategy)
+            .cloned()
+            .unwrap_or_default();
+        atomic_write_json(&stats_dir.join(format!("{strategy}.json")), &stats)?;
+    }
+    Ok(())
+}
+
+fn build_minimal_reports(
+    metrics: &[SessionMetricsRecord],
+    signal_index: &BTreeMap<String, SignalRecord>,
+) -> MinimalReports {
+    let mut reports = MinimalReports {
+        global_all_signals: MinimalStats::default(),
+        global_majority: MajorityStats::default(),
+        by_strategy: STRATEGY_NAMES
+            .iter()
+            .map(|strategy| ((*strategy).to_string(), MinimalStats::default()))
+            .collect(),
+    };
+
+    for metric in metrics {
+        for outcome in &metric.outcomes {
+            for signal_id in &outcome.signal_ids {
+                let Some(signal) = signal_index.get(signal_id) else {
+                    continue;
+                };
+                reports.global_all_signals.add_outcome(outcome);
+                if let Some(stats) = reports.by_strategy.get_mut(&signal.strategy) {
+                    stats.add_outcome(outcome);
+                }
+            }
+        }
+
+        let up = metric
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome.eq_ignore_ascii_case("UP"));
+        let down = metric
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome.eq_ignore_ascii_case("DOWN"));
+        let up_votes = up.map_or(0, |outcome| outcome.signal_ids.len());
+        let down_votes = down.map_or(0, |outcome| outcome.signal_ids.len());
+        match majority_vote(up_votes, down_votes) {
+            MajorityVote::Up => {
+                if let Some(outcome) = up {
+                    reports.global_majority.stats.add_outcome(outcome);
+                }
+            }
+            MajorityVote::Down => {
+                if let Some(outcome) = down {
+                    reports.global_majority.stats.add_outcome(outcome);
+                }
+            }
+            MajorityVote::Tie => reports.global_majority.trades_ignored_tie += 1,
+            MajorityVote::NoSignals => {}
+        }
+    }
+    reports
 }
 
 fn purge(logs_dir: &Path, confirm: bool) -> Result<()> {
@@ -769,7 +915,7 @@ fn directory_size(path: &Path) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::Aggregate;
+    use super::{is_strictly_below_0_50, majority_vote, Aggregate, MajorityVote};
 
     #[test]
     fn aggregate_rates_include_non_fills_in_ev_denominator() {
@@ -786,5 +932,25 @@ mod tests {
         assert_eq!(aggregate.immediate_rate_pct(), 25.0);
         assert_eq!(aggregate.win_rate_pct(), 50.0);
         assert_eq!(aggregate.ev_usdc(), 0.25);
+    }
+
+    #[test]
+    fn strict_crossing_accepts_price_below_half() {
+        assert!(is_strictly_below_0_50(Some(0.49)));
+    }
+
+    #[test]
+    fn strict_crossing_rejects_price_equal_to_half() {
+        assert!(!is_strictly_below_0_50(Some(0.50)));
+    }
+
+    #[test]
+    fn majority_vote_selects_up_for_two_up_and_one_down() {
+        assert_eq!(majority_vote(2, 1), MajorityVote::Up);
+    }
+
+    #[test]
+    fn majority_vote_ignores_equal_votes() {
+        assert_eq!(majority_vote(2, 2), MajorityVote::Tie);
     }
 }

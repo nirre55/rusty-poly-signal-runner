@@ -238,6 +238,7 @@ Fichiers produits :
 | `signals.jsonl` | Signaux individuels avant regroupement et sizing. |
 | `session_metrics.jsonl` | Metriques permanentes de touch/fill a 0,50, profondeur, delais, prix et resultat. |
 | `stats_summary.json` | Rapport agrege regenerable par strategie et par marche. |
+| `stats/*.json` | Compteurs minimaux globaux, majoritaires et par strategie. |
 | `stream_cleanup.jsonl` | Audit des flux bruts supprimes apres validation des metriques. |
 
 Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
@@ -272,6 +273,12 @@ Le rapport distingue `immediate_fak_fills` (liquidite suffisante au moment du si
 `resting_limit_fills` (liquidite suffisante plus tard a `0,50`). La ligne `unique_orders` represente
 le portefeuille reellement groupe; les lignes par strategie attribuent le resultat complet de
 l'ordre a chaque strategie contributrice pour permettre leur comparaison.
+
+La commande `report` regenere aussi `stats/global_all_signals.json`,
+`stats/global_majority.json` et un fichier pour chacune des quatre strategies. Pour ces compteurs,
+un passage sous `0,50` exige un meilleur ask strictement inferieur a `0,50`; un ask egal a `0,50`
+ne compte pas. Le rapport majoritaire retient la direction ayant le plus de votes et compte les
+egalites dans `trades_ignored_tie` sans creer de trade.
 
 ## Reconciliation officielle Polymarket
 
