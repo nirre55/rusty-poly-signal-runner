@@ -7,6 +7,7 @@ pub mod money;
 pub mod polymarket;
 pub mod portfolio;
 pub mod portfolio_runtime;
+pub mod recorder_metrics;
 pub mod runtime_metrics;
 pub mod strategies;
 pub mod strategy;

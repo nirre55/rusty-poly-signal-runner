@@ -18,6 +18,9 @@ fn forward_profile_is_dry_run_recorder_with_all_outputs_enabled() {
     assert!(config
         .lines()
         .any(|line| line == "PORTFOLIO_RECORDER_ENABLED=true"));
+    assert!(config
+        .lines()
+        .any(|line| { line == "PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true" }));
 
     let enabled = EnabledStrategies::load(&matrix_path).unwrap();
     for strategy in PortfolioStrategy::ALL {
