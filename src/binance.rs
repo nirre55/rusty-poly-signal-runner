@@ -135,6 +135,27 @@ pub async fn stream_candles(
     interval: &str,
     tx: mpsc::Sender<Candle>,
 ) -> Result<()> {
+    stream_klines(url, symbol, interval, tx, true).await
+}
+
+/// Streams both in-progress and closed kline updates. Consumers must gate strategy
+/// evaluation on [`Candle::is_closed`].
+pub async fn stream_candle_updates(
+    url: &str,
+    symbol: &str,
+    interval: &str,
+    tx: mpsc::Sender<Candle>,
+) -> Result<()> {
+    stream_klines(url, symbol, interval, tx, false).await
+}
+
+async fn stream_klines(
+    url: &str,
+    symbol: &str,
+    interval: &str,
+    tx: mpsc::Sender<Candle>,
+    closed_only: bool,
+) -> Result<()> {
     let ws_bases = binance_ws_bases(url);
     info!(
         "Connexion au WebSocket Binance: {}",
@@ -198,10 +219,6 @@ pub async fn stream_candles(
                         Ok(Message::Text(text)) => {
                             match serde_json::from_str::<KlineEvent>(&text) {
                                 Ok(event) => {
-                                    if !event.kline.is_closed {
-                                        continue;
-                                    }
-
                                     // P2 : rejeter les timestamps invalides au lieu de retourner l'epoch
                                     let open_time = match DateTime::from_timestamp_millis(
                                         event.kline.open_time,
@@ -279,8 +296,18 @@ pub async fn stream_candles(
                                         low,
                                         close,
                                         volume,
-                                        is_closed: true,
+                                        is_closed: event.kline.is_closed,
                                     };
+
+                                    if !candle.is_closed {
+                                        if closed_only {
+                                            continue;
+                                        }
+                                        if tx.send(candle).await.is_err() {
+                                            return Ok(());
+                                        }
+                                        continue;
+                                    }
 
                                     let candle_close_ms = candle.close_time.timestamp_millis();
 

@@ -24,6 +24,10 @@ use crate::polymarket::{MarketInfo, PolymarketClient};
 use crate::portfolio::{MarketSlot, PortfolioSignal};
 use crate::recorder_metrics::{SessionAnalyzer, SessionMetricContext};
 use crate::strategy::Prediction;
+use crate::trajectory::{
+    finalize_trajectory, trajectory_path, upsert_trajectory_index, TrajectoryIndexRecord,
+    TrajectoryMetadata,
+};
 
 const MARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const SCHEMA_VERSION: u32 = 1;
@@ -38,6 +42,7 @@ pub struct RecorderSettings {
     pub resolution_timeout: Duration,
     pub reconnect_delay: Duration,
     pub delete_stream_after_summary: bool,
+    pub preserve_trajectories: bool,
     pub limit_price: f64,
 }
 
@@ -68,6 +73,10 @@ impl RecorderSettings {
             )?),
             delete_stream_after_summary: parse_bool_env(
                 "PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY",
+                false,
+            ),
+            preserve_trajectories: parse_bool_env(
+                "PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES",
                 false,
             ),
             limit_price: parse_f64_env("LIMIT_PRICE_FIXED", 0.50)?,
@@ -120,6 +129,7 @@ struct RecorderInner {
     feed_configs: BTreeMap<MarketSlot, Config>,
     sessions: Mutex<BTreeMap<SessionKey, ManagedSession>>,
     state_write_lock: Mutex<()>,
+    trajectory_index_lock: Arc<Mutex<()>>,
     completion_tx: mpsc::Sender<SessionKey>,
 }
 
@@ -139,6 +149,9 @@ impl SignalMarketRecorder {
             return Ok(None);
         }
         fs::create_dir_all(settings.root.join("streams"))?;
+        if settings.preserve_trajectories {
+            fs::create_dir_all(settings.root.join("trajectories"))?;
+        }
         let (completion_tx, mut completion_rx) = mpsc::channel(64);
         let recorder = Self {
             inner: Arc::new(RecorderInner {
@@ -147,6 +160,7 @@ impl SignalMarketRecorder {
                 feed_configs,
                 sessions: Mutex::new(BTreeMap::new()),
                 state_write_lock: Mutex::new(()),
+                trajectory_index_lock: Arc::new(Mutex::new(())),
                 completion_tx,
             }),
         };
@@ -303,7 +317,9 @@ impl SignalMarketRecorder {
             .map(|session| session.tx.clone());
         if let Some(tx) = tx {
             if tx
-                .send(SessionControl::BinanceResult(CandleRecord::from(candle)))
+                .send(SessionControl::BinanceObservation(CandleRecord::from(
+                    candle,
+                )))
                 .await
                 .is_err()
             {
@@ -479,6 +495,7 @@ impl SignalMarketRecorder {
             self.inner.settings.clone(),
             rx,
             self.inner.completion_tx.clone(),
+            self.inner.trajectory_index_lock.clone(),
             resumed,
         );
         tokio::spawn(async move { worker.run().await });
@@ -628,7 +645,7 @@ struct SignalRecord<'a> {
     raw_stream_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CandleRecord {
     open_time: DateTime<Utc>,
     close_time: DateTime<Utc>,
@@ -637,6 +654,7 @@ pub struct CandleRecord {
     low: f64,
     close: f64,
     volume: f64,
+    is_closed: bool,
     direction: &'static str,
 }
 
@@ -650,6 +668,7 @@ impl From<&Candle> for CandleRecord {
             low: candle.low,
             close: candle.close,
             volume: candle.volume,
+            is_closed: candle.is_closed,
             direction: if candle.close > candle.open {
                 "UP"
             } else if candle.close < candle.open {
@@ -670,7 +689,7 @@ enum SessionControl {
         prediction: String,
         amount_usdc: f64,
     },
-    BinanceResult(CandleRecord),
+    BinanceObservation(CandleRecord),
     Discard,
 }
 
@@ -739,6 +758,7 @@ struct SessionWorker {
     settings: RecorderSettings,
     controls: mpsc::Receiver<SessionControl>,
     completion_tx: mpsc::Sender<SessionKey>,
+    trajectory_index_lock: Arc<Mutex<()>>,
     active: bool,
     resumed: bool,
     recovery_complete: bool,
@@ -753,6 +773,7 @@ struct SessionWorker {
     last_server_timestamp: Option<String>,
     last_server_timestamp_ms: Option<i64>,
     binance_result: Option<CandleRecord>,
+    last_binance_observation: Option<CandleRecord>,
     resolution: Option<ResolutionRecord>,
     write_failed: bool,
     analyzer: SessionAnalyzer,
@@ -773,6 +794,9 @@ struct RecoveredStreamStats {
 struct RecoveredStreamState {
     stats: RecoveredStreamStats,
     restored_signal_ids: BTreeSet<String>,
+    binance_result: Option<CandleRecord>,
+    last_binance_observation: Option<CandleRecord>,
+    resolution: Option<ResolutionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -789,6 +813,7 @@ impl SessionWorker {
         settings: RecorderSettings,
         controls: mpsc::Receiver<SessionControl>,
         completion_tx: mpsc::Sender<SessionKey>,
+        trajectory_index_lock: Arc<Mutex<()>>,
         resumed: bool,
     ) -> Self {
         let active = persisted.activated;
@@ -800,7 +825,7 @@ impl SessionWorker {
             settings.limit_price,
             persisted.market_info.order_min_size,
         );
-        let (recovered, mut recovery_complete) = if resumed {
+        let (recovered_state, mut recovery_complete) = if resumed {
             match recover_stream_state(&persisted.stream_path, &persisted.signal_ids, &mut analyzer)
             {
                 Ok(recovered) => {
@@ -810,18 +835,18 @@ impl SessionWorker {
                         .cloned()
                         .collect::<BTreeSet<_>>();
                     let complete = recovered.restored_signal_ids == expected;
-                    (recovered.stats, complete)
+                    (recovered, complete)
                 }
                 Err(err) => {
                     warn!(
                         "Reprise analytique impossible {}: {err:#}",
                         persisted.stream_path.display()
                     );
-                    (RecoveredStreamStats::default(), false)
+                    (RecoveredStreamState::default(), false)
                 }
             }
         } else {
-            (RecoveredStreamStats::default(), true)
+            (RecoveredStreamState::default(), true)
         };
         if resumed {
             match recover_order_candidates(&settings.root, &persisted.signal_ids) {
@@ -836,11 +861,19 @@ impl SessionWorker {
                 }
             }
         }
+        let RecoveredStreamState {
+            stats: recovered,
+            binance_result,
+            last_binance_observation,
+            resolution,
+            ..
+        } = recovered_state;
         Self {
             persisted,
             settings,
             controls,
             completion_tx,
+            trajectory_index_lock,
             active,
             resumed,
             recovery_complete,
@@ -854,8 +887,9 @@ impl SessionWorker {
             first_server_timestamp: recovered.first_server_timestamp,
             last_server_timestamp: recovered.last_server_timestamp,
             last_server_timestamp_ms: recovered.last_server_timestamp_ms,
-            binance_result: None,
-            resolution: None,
+            binance_result,
+            last_binance_observation,
+            resolution,
             write_failed: false,
             analyzer,
         }
@@ -974,10 +1008,9 @@ impl SessionWorker {
                                     json!({"prediction": prediction, "amount_usdc": amount_usdc}),
                                 ).await;
                             }
-                            Some(SessionControl::BinanceResult(candle)) => {
-                                self.binance_result = Some(candle);
-                                self.capture_internal("binance_result", json!({"available": true})).await;
-                                if self.resolution.is_some() {
+                            Some(SessionControl::BinanceObservation(candle)) => {
+                                let is_closed = self.capture_binance_observation(candle).await;
+                                if is_closed && self.resolution.is_some() {
                                     break 'session;
                                 }
                             }
@@ -1110,8 +1143,8 @@ impl SessionWorker {
                         ).await;
                         false
                     }
-                    Some(SessionControl::BinanceResult(candle)) => {
-                        self.binance_result = Some(candle);
+                    Some(SessionControl::BinanceObservation(candle)) => {
+                        self.capture_binance_observation(candle).await;
                         false
                     }
                     Some(SessionControl::Discard) | None => true,
@@ -1189,6 +1222,32 @@ impl SessionWorker {
     async fn capture_internal(&mut self, event_type: &str, payload: Value) {
         self.capture_with_connection("internal", event_type, payload, None)
             .await;
+    }
+
+    async fn capture_binance_observation(&mut self, candle: CandleRecord) -> bool {
+        let is_closed = candle.is_closed;
+        if is_closed {
+            self.binance_result = Some(candle.clone());
+        }
+        if self.last_binance_observation.as_ref() == Some(&candle) {
+            return is_closed;
+        }
+        self.capture_internal(
+            "binance_quote",
+            json!({
+                "open_time_ms": candle.open_time.timestamp_millis(),
+                "close_time_ms": candle.close_time.timestamp_millis(),
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "is_closed": candle.is_closed,
+            }),
+        )
+        .await;
+        self.last_binance_observation = Some(candle);
+        is_closed
     }
 
     async fn capture_with_connection(
@@ -1271,6 +1330,48 @@ impl SessionWorker {
         Ok(())
     }
 
+    async fn persist_trajectory(&self, completion_status: &str) -> Option<TrajectoryIndexRecord> {
+        if !self.settings.preserve_trajectories {
+            return None;
+        }
+        let destination = trajectory_path(
+            &self.settings.root,
+            self.persisted.key.entry_time_ms,
+            &self.persisted.session_id,
+        );
+        let metadata = TrajectoryMetadata {
+            session_id: self.persisted.session_id.clone(),
+            market_slot: self.persisted.key.market.key().to_string(),
+            entry_time_ms: self.persisted.key.entry_time_ms,
+            slug: self.persisted.slug.clone(),
+            signal_ids: self.signal_ids.clone(),
+            completion_status: completion_status.to_string(),
+            gap_count: self.gap_count,
+        };
+        let record =
+            match finalize_trajectory(self.persisted.stream_path.clone(), destination, metadata)
+                .await
+            {
+                Ok(record) => record,
+                Err(err) => {
+                    warn!(
+                        "Trajectoire non finalisée {}: {err:#}",
+                        self.persisted.session_id
+                    );
+                    return None;
+                }
+            };
+        let _index_guard = self.trajectory_index_lock.lock().await;
+        if let Err(err) = upsert_trajectory_index(&self.settings.root, record.clone()) {
+            warn!(
+                "Index trajectoire non sauvegardé {}: {err:#}",
+                self.persisted.session_id
+            );
+            return None;
+        }
+        Some(record)
+    }
+
     async fn finalize(&mut self) {
         if let Some(mut writer) = self.writer.take() {
             let _ = writer.flush().await;
@@ -1321,8 +1422,14 @@ impl SessionWorker {
                 false
             }
         };
+        let trajectory = self.persist_trajectory(completion_status).await;
+        let trajectory_ready = !self.settings.preserve_trajectories || trajectory.is_some();
         let mut raw_stream_deleted = false;
-        if metrics_saved && metrics.analysis_complete && self.settings.delete_stream_after_summary {
+        if metrics_saved
+            && metrics.analysis_complete
+            && trajectory_ready
+            && self.settings.delete_stream_after_summary
+        {
             match tokio::fs::remove_file(&self.persisted.stream_path).await {
                 Ok(()) => raw_stream_deleted = true,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1358,6 +1465,12 @@ impl SessionWorker {
             "completion_status": completion_status,
             "metrics_analysis_complete": metrics.analysis_complete,
             "metrics_path": metrics_path,
+            "trajectory_path": trajectory.as_ref().map(|record| record.path.as_str()),
+            "trajectory_sha256": trajectory.as_ref().map(|record| record.sha256.as_str()),
+            "trajectory_observation_count": trajectory.as_ref().map(|record| record.observation_count),
+            "trajectory_compressed_bytes": trajectory.as_ref().map(|record| record.compressed_bytes),
+            "trajectory_uncompressed_bytes": trajectory.as_ref().map(|record| record.uncompressed_bytes),
+            "trajectory_finalized_at": trajectory.as_ref().map(|record| record.finalized_at),
             "raw_stream_path": retained_stream_path,
             "raw_stream_deleted": raw_stream_deleted,
         });
@@ -1543,6 +1656,25 @@ fn recover_stream_state(
                     analyzer.set_order_candidate(prediction, amount_usdc);
                 }
             }
+            "binance_quote" => {
+                if let Some(candle) = candle_record_from_compact(payload) {
+                    if candle.is_closed {
+                        recovered.binance_result = Some(candle.clone());
+                    }
+                    recovered.last_binance_observation = Some(candle);
+                }
+            }
+            "market_resolved" => {
+                recovered.resolution = Some(ResolutionRecord {
+                    source: "RECOVERED_COMPACT_STREAM",
+                    winning_asset_id: extract_string(payload, "winning_asset_id")
+                        .or_else(|| extract_string(payload, "asset_id")),
+                    winning_outcome: extract_string(payload, "winning_outcome")
+                        .or_else(|| extract_string(payload, "outcome")),
+                    observed_at_local: DateTime::<Utc>::from_timestamp_millis(received_at_ms)
+                        .unwrap_or_else(Utc::now),
+                });
+            }
             _ => {
                 analyzer.process_payload(payload, received_at_ms);
                 if kind == "signal_activated" {
@@ -1561,6 +1693,37 @@ fn recover_stream_state(
         }
     }
     Ok(recovered)
+}
+
+fn candle_record_from_compact(payload: &Value) -> Option<CandleRecord> {
+    let open_time = DateTime::<Utc>::from_timestamp_millis(payload.get("open_time_ms")?.as_i64()?)?;
+    let close_time =
+        DateTime::<Utc>::from_timestamp_millis(payload.get("close_time_ms")?.as_i64()?)?;
+    let open = payload.get("open")?.as_f64()?;
+    let high = payload.get("high")?.as_f64()?;
+    let low = payload.get("low")?.as_f64()?;
+    let close = payload.get("close")?.as_f64()?;
+    let volume = payload.get("volume")?.as_f64()?;
+    Some(CandleRecord {
+        open_time,
+        close_time,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        is_closed: payload
+            .get("is_closed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        direction: if close > open {
+            "UP"
+        } else if close < open {
+            "DOWN"
+        } else {
+            "DOJI"
+        },
+    })
 }
 
 fn update_recovered_stats(event: &Value, stats: &mut RecoveredStreamStats) {
@@ -1915,6 +2078,53 @@ mod tests {
                 .and_then(|candidate| candidate.first_fully_fillable.as_ref())
                 .map(|fill| fill.elapsed_from_signal_ms),
             Some(250)
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restart_recovers_closed_binance_candle_and_resolution() {
+        let path = std::env::temp_dir().join(format!(
+            "meche050-recorder-result-resume-{}-{}.jsonl",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let open_time_ms = 1_700_000_000_000_i64;
+        let mut binance = envelope(open_time_ms + 299_999, 1);
+        binance.event_type = "binance_quote".to_string();
+        binance.payload = json!({
+            "open_time_ms":open_time_ms,
+            "close_time_ms":open_time_ms + 299_999,
+            "open":40_000.0,
+            "high":40_200.0,
+            "low":39_900.0,
+            "close":40_100.0,
+            "volume":42.0,
+            "is_closed":true
+        });
+        let mut resolution = envelope(open_time_ms + 300_001, 2);
+        resolution.event_type = "market_resolved".to_string();
+        resolution.payload = json!({
+            "winning_asset_id":"up-token",
+            "winning_outcome":"UP"
+        });
+        append_jsonl(&path, &binance).unwrap();
+        append_jsonl(&path, &resolution).unwrap();
+
+        let mut analyzer = SessionAnalyzer::new("up-token", "down-token", 0.50, 5.0);
+        let recovered = recover_stream_state(&path, &[], &mut analyzer).unwrap();
+
+        assert!(recovered
+            .binance_result
+            .as_ref()
+            .is_some_and(|candle| candle.is_closed && candle.close == 40_100.0));
+        assert_eq!(
+            recovered
+                .resolution
+                .as_ref()
+                .and_then(|value| value.winning_asset_id.as_deref()),
+            Some("up-token")
         );
 
         std::fs::remove_file(path).unwrap();

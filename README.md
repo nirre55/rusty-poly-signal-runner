@@ -239,6 +239,10 @@ Fichiers produits :
 | `session_metrics.jsonl` | Metriques permanentes de touch/fill a 0,50, profondeur, delais, prix et resultat. |
 | `stats_summary.json` | Rapport agrege regenerable par strategie et par marche. |
 | `stats/*.json` | Compteurs minimaux globaux, majoritaires et par strategie. |
+| `trajectories/YYYY-MM-DD/*.jsonl.zst` | Trajectoires compactes Polymarket/Binance, conservees pour les backtests. |
+| `trajectory_index.jsonl` | Index, checksum et taille de chaque trajectoire finalisee. |
+| `stats/temporal/*.json` | Delais de passage strict sous 0,50 et contexte au signal. |
+| `stats/risk/*.json` | MAE/MFE, drawdown et sorties hypothetiques apres entree. |
 | `stream_cleanup.jsonl` | Audit des flux bruts supprimes apres validation des metriques. |
 
 Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
@@ -247,8 +251,9 @@ Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
 
 Le recorder forward reconstruit le carnet en memoire et ne conserve que les changements utiles
 du meilleur bid/ask, la profondeur disponible a `0,50`, les trades et les evenements de cycle de
-vie. A la fin de chaque session, il ecrit les metriques permanentes avant de supprimer le flux
-compact si `PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
+vie. A la fin de chaque session, il ecrit les metriques permanentes, compresse et verifie la
+trajectoire, met a jour son index, puis seulement supprime le flux brut si
+`PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
 Apres un redemarrage, l'etat analytique est reconstruit depuis le flux compact et le sizing
 durable. Si cette reprise ne peut pas etre validee integralement, la metrique est marquee
 incomplete et le flux reste conserve jusqu'a un `backfill` reussi.
@@ -262,12 +267,23 @@ chmod +x meche050_recorder_stats.sh
 ./meche050_recorder_stats.sh purge
 ./meche050_recorder_stats.sh purge --confirm
 ./meche050_recorder_stats.sh verify
+./meche050_recorder_stats.sh repair-index
 ```
 
 La premiere commande `purge` est toujours une simulation. La suppression exige `--confirm`,
 ignore les sessions actives et refuse tout fichier situe hors de `logs/meche050-forward/streams`.
+Lorsque `PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES=true`, le flux brut reste intact tant que sa
+trajectoire compressee n'existe pas ou ne passe pas la verification d'integrite.
 Les fichiers `signals.jsonl`, `signal_sizing.jsonl`, `sessions.jsonl`, `session_metrics.jsonl` et
 `stats_summary.json` ne sont jamais supprimes.
+La commande `purge` ne supprime pas les trajectoires compressees. `verify` valide leur taille,
+checksum, decompression et nombre d'observations. `repair-index` reconstruit explicitement les
+entrees manquantes apres validation; si une compression interrompue a laisse uniquement le flux
+brut, il recree d'abord la trajectoire sans supprimer ce flux source.
+
+Le script charge par defaut `configs/meche050_forward.env`, ce qui inscrit les hypotheses de frais,
+slippage et taille minimale d'echantillon dans les rapports. Un autre fichier peut etre fourni avec
+`MECHE050_STATS_CONFIG=/chemin/config.env`.
 
 Le rapport distingue `immediate_fak_fills` (liquidite suffisante au moment du signal) et
 `resting_limit_fills` (liquidite suffisante plus tard a `0,50`). La ligne `unique_orders` represente
@@ -314,8 +330,9 @@ logs/meche050-forward/trajectory_index.jsonl
 
 Une trajectoire active reste recuperable apres redemarrage. Sa finalisation ecrit d'abord un fichier
 temporaire, valide sa decompression et son nombre d'observations, puis effectue un renommage atomique
-avant d'ajouter une entree idempotente a l'index. `verify` peut reconstruire une entree d'index
-manquante. Les trajectoires sont conservees jusqu'a une purge manuelle ; aucune suppression
+avant d'ajouter une entree idempotente a l'index. `verify` detecte une entree d'index manquante et
+`repair-index` la reconstruit explicitement, y compris si la compression a reussi avant une panne de
+l'index. Les trajectoires sont conservees jusqu'a une purge manuelle ; aucune suppression
 automatique n'est autorisee. La commande `verify` signale les fichiers absents, incomplets ou
 corrompus ainsi que l'espace occupe.
 

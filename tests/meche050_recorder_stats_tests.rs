@@ -2,7 +2,282 @@ use std::fs;
 use std::process::Command;
 
 use chrono::Utc;
+use rusty_poly_signal_runner::trajectory::{
+    finalize_trajectory, upsert_trajectory_index, TrajectoryMetadata,
+};
 use serde_json::{json, Value};
+
+#[tokio::test]
+async fn compressed_shared_trajectory_generates_temporal_and_risk_reports() {
+    let root = temporary_root("trajectory-reports");
+    let logs = root.join("logs");
+    let entry_time_ms = 1_700_000_000_000_i64;
+    let signal_ids = vec![
+        "btc_5m:1700000000000:boll_fade:up".to_string(),
+        "btc_5m:1700000000000:trio_vote2:up".to_string(),
+        "btc_5m:1700000000000:streak_rsi:down".to_string(),
+    ];
+    let source = logs.join("streams").join("trajectory-source.jsonl");
+    write_jsonl(
+        &source,
+        &[
+            envelope(
+                entry_time_ms,
+                "signal_snapshot",
+                quote_payload("UP", entry_time_ms, 0.49, 0.50, 0.49, 8.0),
+            ),
+            envelope(
+                entry_time_ms + 10_000,
+                "quote",
+                quote_payload("UP", entry_time_ms + 10_000, 0.48, 0.49, 0.47, 8.0),
+            ),
+            envelope(
+                entry_time_ms + 25_000,
+                "binance_quote",
+                json!({"open":40_000.0,"close":40_100.0,"is_closed":false}),
+            ),
+            envelope(
+                entry_time_ms + 25_000,
+                "quote",
+                quote_payload("UP", entry_time_ms + 25_000, 0.40, 0.42, 0.39, 20.0),
+            ),
+            envelope(
+                entry_time_ms + 30_000,
+                "quote",
+                quote_payload("UP", entry_time_ms + 30_000, 0.52, 0.53, 0.51, 20.0),
+            ),
+        ],
+    );
+    let trajectory = finalize_trajectory(
+        source,
+        logs.join("trajectories/2023-11-14/session-shared.jsonl.zst"),
+        TrajectoryMetadata {
+            session_id: "session-shared".to_string(),
+            market_slot: "btc_5m".to_string(),
+            entry_time_ms,
+            slug: "btc-updown-5m-shared".to_string(),
+            signal_ids: signal_ids.clone(),
+            completion_status: "RESOLVED_COMPLETE".to_string(),
+            gap_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    upsert_trajectory_index(&logs, trajectory).unwrap();
+
+    write_jsonl(
+        &logs.join("sessions.jsonl"),
+        &[json!({
+            "session_id":"session-shared",
+            "market_slot":"btc_5m",
+            "entry_time_ms":entry_time_ms,
+            "slug":"btc-updown-5m-shared",
+            "up_token_id":"up-token",
+            "down_token_id":"down-token",
+            "signal_ids":signal_ids,
+            "completion_status":"RESOLVED_COMPLETE",
+            "gap_count":0,
+            "resolution":{"winning_asset_id":"up-token","winning_outcome":"UP"},
+            "raw_stream_path":null
+        })],
+    );
+    write_jsonl(
+        &logs.join("signals.jsonl"),
+        &[
+            signal_record_at(
+                "session-shared",
+                "btc_5m:1700000000000:boll_fade:up",
+                entry_time_ms,
+            ),
+            signal_record_at(
+                "session-shared",
+                "btc_5m:1700000000000:trio_vote2:up",
+                entry_time_ms,
+            ),
+            signal_record_at(
+                "session-shared",
+                "btc_5m:1700000000000:streak_rsi:down",
+                entry_time_ms,
+            ),
+        ],
+    );
+    write_jsonl(
+        &logs.join("session_metrics.jsonl"),
+        &[trajectory_metric(entry_time_ms)],
+    );
+
+    run(&logs, &["report"]);
+
+    let temporal = read_json(&logs.join("stats/temporal/global_majority.json"));
+    assert_eq!(temporal["overall"]["total_signals"], 1);
+    assert_eq!(temporal["overall"]["crossed_below_0_50"], 1);
+    assert_eq!(temporal["overall"]["time_to_cross_seconds"]["median"], 10.0);
+    let boll = read_json(&logs.join("stats/temporal/boll_fade.json"));
+    let trio = read_json(&logs.join("stats/temporal/trio_vote2.json"));
+    assert_eq!(boll["overall"]["crossed_below_0_50"], 1);
+    assert_eq!(trio["overall"]["crossed_below_0_50"], 1);
+
+    let risk = read_json(&logs.join("stats/risk/global_majority.json"));
+    assert_approx(
+        risk["overall"]["maximum_drawdown"]["maximum"]
+            .as_f64()
+            .unwrap(),
+        0.08,
+    );
+    assert_approx(
+        risk["overall"]["horizons"]["t15s"]["spread"]["median"]
+            .as_f64()
+            .unwrap(),
+        0.02,
+    );
+
+    for scope in [
+        "global_all_signals",
+        "global_majority",
+        "boll_fade",
+        "streak_rsi",
+        "trio_vote2",
+        "reversal_pro",
+    ] {
+        assert!(logs.join(format!("stats/temporal/{scope}.json")).exists());
+        assert!(logs.join(format!("stats/risk/{scope}.json")).exists());
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn repair_index_and_backfill_work_from_compressed_trajectory_only() {
+    let root = temporary_root("repair-index");
+    let logs = root.join("logs");
+    let entry_time_ms = 1_700_000_300_000_i64;
+    let signal_id = "btc_5m:1700000300000:boll_fade:up";
+    let source = logs.join("streams/source.jsonl");
+    write_jsonl(
+        &source,
+        &[
+            envelope(
+                entry_time_ms,
+                "signal_snapshot",
+                quote_payload("UP", entry_time_ms, 0.48, 0.50, 0.47, 4.0),
+            ),
+            envelope(
+                entry_time_ms + 250,
+                "quote",
+                quote_payload("UP", entry_time_ms + 250, 0.48, 0.49, 0.47, 6.0),
+            ),
+        ],
+    );
+    let _record = finalize_trajectory(
+        source.clone(),
+        logs.join("trajectories/2023-11-14/session-repair.jsonl.zst"),
+        TrajectoryMetadata {
+            session_id: "session-repair".to_string(),
+            market_slot: "btc_5m".to_string(),
+            entry_time_ms,
+            slug: "btc-updown-5m-repair".to_string(),
+            signal_ids: vec![signal_id.to_string()],
+            completion_status: "RESOLVED_COMPLETE".to_string(),
+            gap_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    fs::remove_file(source).unwrap();
+    write_jsonl(
+        &logs.join("sessions.jsonl"),
+        &[json!({
+            "session_id":"session-repair",
+            "market_slot":"btc_5m",
+            "entry_time_ms":entry_time_ms,
+            "slug":"btc-updown-5m-repair",
+            "up_token_id":"up-token",
+            "down_token_id":"down-token",
+            "signal_ids":[signal_id],
+            "resolution":{"winning_asset_id":"up-token","winning_outcome":"UP"},
+            "completion_status":"RESOLVED_COMPLETE",
+            "gap_count":0,
+            "raw_stream_path":null
+        })],
+    );
+    write_jsonl(
+        &logs.join("signals.jsonl"),
+        &[signal_record_at("session-repair", signal_id, entry_time_ms)],
+    );
+    write_jsonl(
+        &logs.join("signal_sizing.jsonl"),
+        &[json!({
+            "signal_id":signal_id,
+            "disposition":"DRY_RUN_ORDER_CANDIDATE",
+            "details":{"combined_amount_usdc":2.5}
+        })],
+    );
+    fs::write(
+        logs.join("recorder_state.json"),
+        br#"{"schema_version":1,"active_sessions":[]}"#,
+    )
+    .unwrap();
+
+    run(&logs, &["repair-index"]);
+    run(&logs, &["verify"]);
+    run(&logs, &["backfill"]);
+
+    let index = fs::read_to_string(logs.join("trajectory_index.jsonl")).unwrap();
+    let indexed: Value = serde_json::from_str(index.trim()).unwrap();
+    assert_eq!(indexed["signal_ids"], json!([signal_id]));
+    let metrics: Value = serde_json::from_str(
+        fs::read_to_string(logs.join("session_metrics.jsonl"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(metrics["source_format"], "backfill_compact_v2");
+    assert_eq!(metrics["outcomes"][1]["order_fill_result"], "WIN");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repair_index_finalizes_a_retained_raw_stream_after_interrupted_compression() {
+    let root = temporary_root("repair-raw");
+    let logs = root.join("logs");
+    let entry_time_ms = 1_700_000_600_000_i64;
+    let source = logs.join("streams/session-repair-raw.jsonl");
+    write_jsonl(
+        &source,
+        &[envelope(
+            entry_time_ms,
+            "signal_snapshot",
+            quote_payload("UP", entry_time_ms, 0.48, 0.49, 0.47, 6.0),
+        )],
+    );
+    write_jsonl(
+        &logs.join("sessions.jsonl"),
+        &[json!({
+            "session_id":"session-repair-raw",
+            "market_slot":"btc_5m",
+            "entry_time_ms":entry_time_ms,
+            "slug":"btc-updown-5m-repair-raw",
+            "up_token_id":"up-token",
+            "down_token_id":"down-token",
+            "signal_ids":["btc_5m:1700000600000:boll_fade:up"],
+            "completion_status":"RESOLVED_COMPLETE",
+            "gap_count":0,
+            "raw_stream_path":source
+        })],
+    );
+
+    run(&logs, &["repair-index"]);
+    run(&logs, &["verify"]);
+
+    assert!(source.exists());
+    assert!(logs
+        .join("trajectories/2023-11-14/session-repair-raw.jsonl.zst")
+        .exists());
+    assert!(logs.join("trajectory_index.jsonl").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
 
 #[test]
 fn backfill_report_and_confirmed_purge_preserve_metrics() {
@@ -113,6 +388,42 @@ fn backfill_report_and_confirmed_purge_preserve_metrics() {
     assert!(logs.join("stream_cleanup.jsonl").exists());
     assert!(logs.join("session_metrics.jsonl").exists());
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn confirmed_purge_keeps_raw_stream_when_required_trajectory_is_missing() {
+    let root = temporary_root("protected-purge");
+    let logs = root.join("logs");
+    let stream = logs.join("streams/session-protected.jsonl");
+    write_jsonl(&stream, &[envelope(1_000, "signal_activated", json!({}))]);
+    write_jsonl(
+        &logs.join("sessions.jsonl"),
+        &[json!({
+            "session_id":"session-protected",
+            "market_slot":"btc_5m",
+            "entry_time_ms":1_000,
+            "slug":"btc-updown-5m-protected",
+            "up_token_id":"up-token",
+            "down_token_id":"down-token",
+            "raw_stream_path":stream
+        })],
+    );
+    write_jsonl(
+        &logs.join("session_metrics.jsonl"),
+        &[metric_record(
+            "session-protected",
+            1_000,
+            &["btc_5m:1000:boll_fade:up"],
+            &[],
+            0.49,
+            0.60,
+        )],
+    );
+
+    run_with_preserved_trajectories(&logs, &["purge", "--confirm"]);
+
+    assert!(stream.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -398,6 +709,10 @@ fn outcome_record(
 }
 
 fn signal_record(session_id: &str, signal_id: &str) -> Value {
+    signal_record_at(session_id, signal_id, 1_000)
+}
+
+fn signal_record_at(session_id: &str, signal_id: &str, detected_at_ms: i64) -> Value {
     let mut parts = signal_id.rsplit(':');
     let prediction = parts.next().unwrap().to_ascii_uppercase();
     let strategy = parts.next().unwrap();
@@ -407,8 +722,92 @@ fn signal_record(session_id: &str, signal_id: &str) -> Value {
         "strategy":strategy,
         "market_slot":"btc_5m",
         "prediction":prediction,
-        "detected_at_local":"1970-01-01T00:00:01Z"
+        "detected_at_local":chrono::DateTime::<Utc>::from_timestamp_millis(detected_at_ms)
+            .unwrap()
+            .to_rfc3339()
     })
+}
+
+fn trajectory_metric(entry_time_ms: i64) -> Value {
+    let up_signals = [
+        "btc_5m:1700000000000:boll_fade:up",
+        "btc_5m:1700000000000:trio_vote2:up",
+    ];
+    let down_signals = ["btc_5m:1700000000000:streak_rsi:down"];
+    json!({
+        "schema_version":2,
+        "record_type":"SESSION_METRICS",
+        "generated_at":"2023-11-14T22:13:21Z",
+        "source_format":"runtime_compact_v2",
+        "analysis_complete":true,
+        "session_id":"session-shared",
+        "market_slot":"btc_5m",
+        "entry_time_ms":entry_time_ms,
+        "slug":"btc-updown-5m-shared",
+        "limit_price":0.5,
+        "minimum_shares":5.0,
+        "completion_status":"RESOLVED_COMPLETE",
+        "gap_count":0,
+        "reconnect_count":0,
+        "resolution_winning_asset_id":"up-token",
+        "resolution_winning_outcome":"UP",
+        "outcomes":[
+            outcome_record_at("DOWN", "down-token", &down_signals, entry_time_ms, 0.60, false),
+            outcome_record_at("UP", "up-token", &up_signals, entry_time_ms, 0.49, true)
+        ],
+        "raw_stream_path":null
+    })
+}
+
+fn outcome_record_at(
+    outcome: &str,
+    token_id: &str,
+    signal_ids: &[&str],
+    signal_at_ms: i64,
+    minimum_ask: f64,
+    winning_outcome: bool,
+) -> Value {
+    let mut value = outcome_record(outcome, token_id, signal_ids, minimum_ask, winning_outcome);
+    value["signal_at_unix_ms"] = json!(signal_at_ms);
+    value["min_best_ask"]["observed_at_unix_ms"] = json!(signal_at_ms + 10_000);
+    value
+}
+
+fn quote_payload(
+    outcome: &str,
+    observed_at_ms: i64,
+    bid: f64,
+    ask: f64,
+    sell_vwap_5: f64,
+    ask_depth: f64,
+) -> Value {
+    json!({
+        "outcome":outcome,
+        "asset_id":"up-token",
+        "observed_at_unix_ms":observed_at_ms,
+        "best_bid":bid,
+        "best_bid_size":10.0,
+        "bid_shares_available":20.0,
+        "best_ask":ask,
+        "best_ask_size":ask_depth,
+        "ask_shares_at_or_below_limit":ask_depth,
+        "sell_vwap_5":sell_vwap_5,
+        "sell_vwap_candidate":sell_vwap_5,
+        "candidate_shares":5.0,
+        "last_trade_price":(bid + ask) / 2.0
+    })
+}
+
+fn temporary_root(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "meche050-{name}-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ))
+}
+
+fn assert_approx(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
 }
 
 fn read_json(path: &std::path::Path) -> Value {
@@ -437,10 +836,26 @@ fn write_jsonl(path: &std::path::Path, values: &[Value]) {
 }
 
 fn run(logs: &std::path::Path, arguments: &[&str]) {
+    run_with_trajectory_setting(logs, arguments, false);
+}
+
+fn run_with_preserved_trajectories(logs: &std::path::Path, arguments: &[&str]) {
+    run_with_trajectory_setting(logs, arguments, true);
+}
+
+fn run_with_trajectory_setting(
+    logs: &std::path::Path,
+    arguments: &[&str],
+    preserve_trajectories: bool,
+) {
     let output = Command::new(env!("CARGO_BIN_EXE_meche050_recorder_stats"))
         .arg("--logs-dir")
         .arg(logs)
         .args(arguments)
+        .env(
+            "PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES",
+            preserve_trajectories.to_string(),
+        )
         .output()
         .unwrap();
     assert!(

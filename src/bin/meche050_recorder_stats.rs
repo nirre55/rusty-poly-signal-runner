@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 use rusty_poly_signal_runner::recorder_metrics::{
     OutcomeMetrics, SessionAnalyzer, SessionMetricContext, SessionMetricsRecord,
 };
+use rusty_poly_signal_runner::trajectory::{
+    finalize_trajectory_sync, load_trajectory_index, open_trajectory_reader,
+    recover_trajectory_index_record, trajectory_path, upsert_trajectory_index, verify_trajectory,
+    TrajectoryIndexRecord, TrajectoryMetadata,
+};
+use rusty_poly_signal_runner::trajectory_analysis::ExitCostAssumptions;
+use rusty_poly_signal_runner::trajectory_reports::{
+    build_trajectory_reports, ReportOutcome, ReportSession, ReportSettings, ReportSignal,
+};
 
 const FIXED_LIMIT_PRICE: f64 = 0.50;
 const MINIMUM_SHARES: f64 = 5.0;
@@ -31,8 +40,22 @@ struct SessionSummary {
     slug: String,
     up_token_id: String,
     down_token_id: String,
+    #[serde(default)]
+    signal_ids: Vec<String>,
     resolution: Option<Resolution>,
     raw_stream_path: Option<String>,
+    #[serde(default)]
+    trajectory_path: Option<String>,
+    #[serde(default)]
+    trajectory_sha256: Option<String>,
+    #[serde(default)]
+    trajectory_observation_count: Option<u64>,
+    #[serde(default)]
+    trajectory_compressed_bytes: Option<u64>,
+    #[serde(default)]
+    trajectory_uncompressed_bytes: Option<u64>,
+    #[serde(default)]
+    trajectory_finalized_at: Option<DateTime<Utc>>,
     #[serde(default)]
     completion_status: String,
     #[serde(default)]
@@ -247,14 +270,18 @@ fn main() -> Result<()> {
         "report" => report(&cli.logs_dir),
         "purge" => purge(&cli.logs_dir, cli.confirm),
         "verify" => verify(&cli.logs_dir),
+        "repair-index" => repair_trajectory_index(&cli.logs_dir),
         "all" => {
             backfill(&cli.logs_dir)?;
+            if parse_env_bool("PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES", false)? {
+                repair_trajectory_index(&cli.logs_dir)?;
+            }
             report(&cli.logs_dir)?;
             purge(&cli.logs_dir, cli.confirm)?;
             verify(&cli.logs_dir)
         }
         command => Err(anyhow!(
-            "commande inconnue '{command}'; utilisez backfill, report, purge, verify ou all"
+            "commande inconnue '{command}'; utilisez backfill, report, purge, verify, repair-index ou all"
         )),
     }
 }
@@ -299,31 +326,48 @@ fn backfill(logs_dir: &Path) -> Result<()> {
         .collect::<BTreeSet<_>>();
     let signals_by_session = group_signals_by_session(signals);
     let candidate_amounts = candidate_amounts_by_signal(sizing);
+    let trajectory_index = load_trajectory_index(&logs_dir.join("trajectory_index.jsonl"))?
+        .into_iter()
+        .map(|record| (record.session_id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
     let mut generated = 0_u64;
-    let mut skipped_missing_stream = 0_u64;
+    let mut skipped_missing_source = 0_u64;
 
     for session in sessions.values() {
         if completed.contains(&session.session_id) {
             continue;
         }
-        let Some(stream_value) = session.raw_stream_path.as_deref() else {
-            skipped_missing_stream += 1;
+        let source = session
+            .raw_stream_path
+            .as_deref()
+            .map(resolve_runtime_path)
+            .filter(|path| path.exists())
+            .or_else(|| {
+                session
+                    .trajectory_path
+                    .as_deref()
+                    .map(resolve_runtime_path)
+                    .filter(|path| path.exists())
+            })
+            .or_else(|| {
+                trajectory_index
+                    .get(&session.session_id)
+                    .map(|record| resolve_runtime_path(&record.path))
+                    .filter(|path| path.exists())
+            });
+        let Some(source_path) = source else {
+            skipped_missing_source += 1;
             continue;
         };
-        let stream_path = resolve_runtime_path(stream_value);
-        if !stream_path.exists() {
-            skipped_missing_stream += 1;
-            continue;
-        }
         let session_signals = signals_by_session
             .get(&session.session_id)
             .cloned()
             .unwrap_or_default();
         if session_signals.is_empty() {
-            skipped_missing_stream += 1;
+            skipped_missing_source += 1;
             continue;
         }
-        let metric = backfill_session(session, &session_signals, &candidate_amounts, &stream_path)
+        let metric = backfill_session(session, &session_signals, &candidate_amounts, &source_path)
             .with_context(|| format!("backfill session {}", session.session_id))?;
         let analysis_complete = metric.analysis_complete;
         append_jsonl(&metrics_path, &metric)?;
@@ -333,15 +377,17 @@ fn backfill(logs_dir: &Path) -> Result<()> {
         generated += 1;
         println!(
             "BACKFILLED\t{}\t{}\t{}",
-            session.session_id, session.market_slot, stream_value
+            session.session_id,
+            session.market_slot,
+            source_path.display()
         );
     }
 
     println!(
-        "BACKFILL_SUMMARY\tgenerated={}\ttotal_metrics={}\tmissing_stream={}",
+        "BACKFILL_SUMMARY\tgenerated={}\ttotal_metrics={}\tmissing_source={}",
         generated,
         completed.len(),
-        skipped_missing_stream
+        skipped_missing_source
     );
     Ok(())
 }
@@ -369,11 +415,9 @@ fn backfill_session(
         }
     }
 
-    let file = fs::File::open(stream_path)
-        .with_context(|| format!("lecture stream {}", stream_path.display()))?;
     let mut activated_predictions = BTreeSet::new();
     let mut saw_compact_quotes = false;
-    for line in BufReader::new(file).lines() {
+    for line in open_trajectory_reader(stream_path)?.lines() {
         let line = line?;
         let Ok(envelope) = serde_json::from_str::<StreamEnvelope>(&line) else {
             continue;
@@ -566,7 +610,120 @@ fn report(logs_dir: &Path) -> Result<()> {
         }),
     )?;
     write_minimal_reports(logs_dir, &metrics, &signal_index)?;
+    write_trajectory_reports(logs_dir, &metrics, &signal_index)?;
     Ok(())
+}
+
+fn write_trajectory_reports(
+    logs_dir: &Path,
+    metrics: &[SessionMetricsRecord],
+    signal_index: &BTreeMap<String, SignalRecord>,
+) -> Result<()> {
+    let sessions = load_sessions(&logs_dir.join("sessions.jsonl"))?;
+    let trajectory_index = load_trajectory_index(&logs_dir.join("trajectory_index.jsonl"))?
+        .into_iter()
+        .map(|record| (record.session_id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let inputs = build_report_sessions(metrics, signal_index, &sessions, &trajectory_index);
+    let settings = ReportSettings {
+        costs: ExitCostAssumptions {
+            fee_bps: parse_env_f64("PORTFOLIO_STATS_EXIT_FEE_BPS", 0.0)?,
+            slippage_bps: parse_env_f64("PORTFOLIO_STATS_EXIT_SLIPPAGE_BPS", 0.0)?,
+        },
+        minimum_sample_size: parse_env_u64("PORTFOLIO_STATS_MIN_SAMPLE_SIZE", 30)?,
+    };
+    let reports = build_trajectory_reports(&inputs, &STRATEGY_NAMES, settings);
+    for (name, report) in reports.temporal {
+        atomic_write_json(
+            &logs_dir
+                .join("stats")
+                .join("temporal")
+                .join(format!("{name}.json")),
+            &report,
+        )?;
+    }
+    for (name, report) in reports.risk {
+        atomic_write_json(
+            &logs_dir
+                .join("stats")
+                .join("risk")
+                .join(format!("{name}.json")),
+            &report,
+        )?;
+    }
+    Ok(())
+}
+
+fn build_report_sessions(
+    metrics: &[SessionMetricsRecord],
+    signal_index: &BTreeMap<String, SignalRecord>,
+    sessions: &BTreeMap<String, SessionSummary>,
+    trajectory_index: &BTreeMap<String, TrajectoryIndexRecord>,
+) -> Vec<ReportSession> {
+    metrics
+        .iter()
+        .map(|metric| {
+            let summary = sessions.get(&metric.session_id);
+            let trajectory_path = summary
+                .and_then(|session| session.trajectory_path.as_deref())
+                .or_else(|| {
+                    trajectory_index
+                        .get(&metric.session_id)
+                        .map(|record| record.path.as_str())
+                })
+                .map(resolve_runtime_path);
+            let outcomes = metric
+                .outcomes
+                .iter()
+                .filter(|outcome| !outcome.signal_ids.is_empty())
+                .map(|outcome| {
+                    let signals = outcome
+                        .signal_ids
+                        .iter()
+                        .filter_map(|signal_id| signal_index.get(signal_id))
+                        .map(|signal| ReportSignal {
+                            signal_id: signal.signal_id.clone(),
+                            strategy: signal.strategy.clone(),
+                            prediction: signal.prediction.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let signal_at_unix_ms = outcome.signal_at_unix_ms.unwrap_or_else(|| {
+                        outcome
+                            .signal_ids
+                            .iter()
+                            .filter_map(|signal_id| signal_index.get(signal_id))
+                            .map(|signal| signal.detected_at_local.timestamp_millis())
+                            .min()
+                            .unwrap_or(metric.entry_time_ms)
+                    });
+                    ReportOutcome {
+                        outcome: outcome.outcome.clone(),
+                        signal_at_unix_ms,
+                        winning_outcome: outcome.winning_outcome,
+                        signals,
+                    }
+                })
+                .collect();
+            ReportSession {
+                session_id: metric.session_id.clone(),
+                market_slot: metric.market_slot.clone(),
+                target_close_time_ms: metric.entry_time_ms + interval_millis(&metric.market_slot)
+                    - 1,
+                completion_status: metric.completion_status.clone(),
+                gap_count: metric.gap_count,
+                trajectory_path,
+                outcomes,
+            }
+        })
+        .collect()
+}
+
+fn interval_millis(market_slot: &str) -> i64 {
+    if market_slot.ends_with("_15m") {
+        15 * 60 * 1_000
+    } else {
+        5 * 60 * 1_000
+    }
 }
 
 fn write_minimal_reports(
@@ -658,9 +815,15 @@ fn purge(logs_dir: &Path, confirm: bool) -> Result<()> {
         .map(|metric| metric.session_id.as_str())
         .collect::<BTreeSet<_>>();
     let active = load_active_session_ids(&logs_dir.join("recorder_state.json"))?;
+    let require_trajectory = parse_env_bool("PORTFOLIO_RECORDER_PRESERVE_TRAJECTORIES", false)?;
+    let trajectory_index = load_trajectory_index(&logs_dir.join("trajectory_index.jsonl"))?
+        .into_iter()
+        .map(|record| (record.session_id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
     let streams_root = fs::canonicalize(logs_dir.join("streams"))
         .with_context(|| format!("dossier streams absent dans {}", logs_dir.display()))?;
     let mut candidates = Vec::new();
+    let mut skipped_without_trajectory = 0_u64;
     for session in sessions.values() {
         if !completed.contains(session.session_id.as_str()) || active.contains(&session.session_id)
         {
@@ -680,16 +843,35 @@ fn purge(logs_dir: &Path, confirm: bool) -> Result<()> {
                 canonical.display()
             ));
         }
+        if require_trajectory {
+            let Some(record) = trajectory_index.get(&session.session_id) else {
+                skipped_without_trajectory += 1;
+                continue;
+            };
+            let mut resolved = record.clone();
+            resolved.path = resolve_runtime_path(&record.path)
+                .to_string_lossy()
+                .into_owned();
+            if let Err(error) = verify_trajectory(&resolved) {
+                skipped_without_trajectory += 1;
+                eprintln!(
+                    "PURGE_SKIPPED_INVALID_TRAJECTORY\t{}\t{error:#}",
+                    session.session_id
+                );
+                continue;
+            }
+        }
         let bytes = fs::metadata(&canonical)?.len();
         candidates.push((session.session_id.clone(), canonical, bytes));
     }
     let total_bytes = candidates.iter().map(|(_, _, bytes)| *bytes).sum::<u64>();
     println!(
-        "PURGE_PLAN\tfiles={}\tbytes={}\tgib={:.3}\tconfirmed={}",
+        "PURGE_PLAN\tfiles={}\tbytes={}\tgib={:.3}\tconfirmed={}\tskipped_without_trajectory={}",
         candidates.len(),
         total_bytes,
         total_bytes as f64 / 1_073_741_824.0,
-        confirm
+        confirm,
+        skipped_without_trajectory
     );
     if !confirm {
         println!("DRY_RUN_ONLY\trelancez avec --confirm après avoir vérifié le rapport");
@@ -719,6 +901,41 @@ fn verify(logs_dir: &Path) -> Result<()> {
     let active = load_active_session_ids(&logs_dir.join("recorder_state.json"))?;
     let raw_files = count_files(&logs_dir.join("streams"), "jsonl")?;
     let raw_bytes = directory_size(&logs_dir.join("streams"))?;
+    let trajectory_files = count_files(&logs_dir.join("trajectories"), "zst")?;
+    let trajectory_bytes = directory_size(&logs_dir.join("trajectories"))?;
+    let trajectory_index = load_trajectory_index(&logs_dir.join("trajectory_index.jsonl"))?;
+    let indexed_ids = trajectory_index
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut invalid_trajectories = 0_u64;
+    for record in &trajectory_index {
+        let mut resolved = record.clone();
+        resolved.path = resolve_runtime_path(&record.path)
+            .to_string_lossy()
+            .into_owned();
+        if let Err(error) = verify_trajectory(&resolved) {
+            invalid_trajectories += 1;
+            eprintln!("TRAJECTORY_INVALID\t{}\t{error:#}", record.session_id);
+        }
+    }
+    let mut reconstructable_index_entries = 0_u64;
+    for session in sessions
+        .values()
+        .filter(|session| !indexed_ids.contains(session.session_id.as_str()))
+    {
+        match recoverable_index_record(logs_dir, session) {
+            Ok(Some(_)) => reconstructable_index_entries += 1,
+            Ok(None) => {}
+            Err(error) => {
+                invalid_trajectories += 1;
+                eprintln!(
+                    "TRAJECTORY_UNINDEXED_INVALID\t{}\t{error:#}",
+                    session.session_id
+                );
+            }
+        }
+    }
     let metric_ids = metrics
         .iter()
         .filter(|metric| metric.analysis_complete)
@@ -732,8 +949,131 @@ fn verify(logs_dir: &Path) -> Result<()> {
         .keys()
         .filter(|session_id| !metric_ids.contains(session_id.as_str()))
         .count();
-    println!("VERIFY\tsessions={}\tmetrics={}\tincomplete_metrics={}\tactive={}\traw_files={}\traw_gib={:.3}\tfinalized_without_metrics={}", sessions.len(), metric_ids.len(), incomplete_metrics, active.len(), raw_files, raw_bytes as f64 / 1_073_741_824.0, finalized_without_metrics);
+    println!("VERIFY\tsessions={}\tmetrics={}\tincomplete_metrics={}\tactive={}\traw_files={}\traw_gib={:.3}\ttrajectory_files={}\ttrajectory_gib={:.3}\tindexed_trajectories={}\treconstructable_index_entries={}\tinvalid_trajectories={}\tfinalized_without_metrics={}", sessions.len(), metric_ids.len(), incomplete_metrics, active.len(), raw_files, raw_bytes as f64 / 1_073_741_824.0, trajectory_files, trajectory_bytes as f64 / 1_073_741_824.0, trajectory_index.len(), reconstructable_index_entries, invalid_trajectories, finalized_without_metrics);
+    if invalid_trajectories > 0 {
+        return Err(anyhow!(
+            "{} trajectoire(s) invalide(s)",
+            invalid_trajectories
+        ));
+    }
     Ok(())
+}
+
+fn repair_trajectory_index(logs_dir: &Path) -> Result<()> {
+    let sessions = load_sessions(&logs_dir.join("sessions.jsonl"))?;
+    let indexed_ids = load_trajectory_index(&logs_dir.join("trajectory_index.jsonl"))?
+        .into_iter()
+        .map(|record| record.session_id)
+        .collect::<BTreeSet<_>>();
+    let mut recoverable = Vec::new();
+    let mut incomplete_metadata = 0_u64;
+
+    for session in sessions.values() {
+        if indexed_ids.contains(&session.session_id) {
+            continue;
+        }
+        let record = match recoverable_index_record(logs_dir, session)? {
+            Some(record) => record,
+            None => {
+                let Some(source) = session
+                    .raw_stream_path
+                    .as_deref()
+                    .map(resolve_runtime_path)
+                    .filter(|path| path.exists())
+                else {
+                    incomplete_metadata += 1;
+                    continue;
+                };
+                let destination =
+                    trajectory_path(logs_dir, session.entry_time_ms, &session.session_id);
+                finalize_trajectory_sync(&source, &destination, trajectory_metadata(session))
+                    .with_context(|| {
+                        format!(
+                            "finalisation réparatrice de la session {}",
+                            session.session_id
+                        )
+                    })?
+            }
+        };
+        recoverable.push(record);
+    }
+
+    for record in &recoverable {
+        upsert_trajectory_index(logs_dir, record.clone())?;
+        println!("INDEX_REPAIRED\t{}\t{}", record.session_id, record.path);
+    }
+    println!(
+        "REPAIR_INDEX_SUMMARY\trepaired={}\tincomplete_metadata={}",
+        recoverable.len(),
+        incomplete_metadata
+    );
+    Ok(())
+}
+
+fn recoverable_index_record(
+    logs_dir: &Path,
+    session: &SessionSummary,
+) -> Result<Option<TrajectoryIndexRecord>> {
+    if let Some(record) = reconstruct_index_record(session) {
+        let mut resolved = record.clone();
+        resolved.path = resolve_runtime_path(&record.path)
+            .to_string_lossy()
+            .into_owned();
+        verify_trajectory(&resolved).with_context(|| {
+            format!(
+                "validation des métadonnées de la session {}",
+                session.session_id
+            )
+        })?;
+        return Ok(Some(record));
+    }
+    let path = session
+        .trajectory_path
+        .as_deref()
+        .map(resolve_runtime_path)
+        .unwrap_or_else(|| trajectory_path(logs_dir, session.entry_time_ms, &session.session_id));
+    if !path.exists() {
+        return Ok(None);
+    }
+    recover_trajectory_index_record(&path, trajectory_metadata(session))
+        .with_context(|| {
+            format!(
+                "reconstruction des métadonnées de la session {}",
+                session.session_id
+            )
+        })
+        .map(Some)
+}
+
+fn trajectory_metadata(session: &SessionSummary) -> TrajectoryMetadata {
+    TrajectoryMetadata {
+        session_id: session.session_id.clone(),
+        market_slot: session.market_slot.clone(),
+        entry_time_ms: session.entry_time_ms,
+        slug: session.slug.clone(),
+        signal_ids: session.signal_ids.clone(),
+        completion_status: session.completion_status.clone(),
+        gap_count: session.gap_count,
+    }
+}
+
+fn reconstruct_index_record(session: &SessionSummary) -> Option<TrajectoryIndexRecord> {
+    Some(TrajectoryIndexRecord {
+        schema_version: 1,
+        session_id: session.session_id.clone(),
+        market_slot: session.market_slot.clone(),
+        entry_time_ms: session.entry_time_ms,
+        slug: session.slug.clone(),
+        signal_ids: session.signal_ids.clone(),
+        completion_status: session.completion_status.clone(),
+        gap_count: session.gap_count,
+        path: session.trajectory_path.clone()?,
+        sha256: session.trajectory_sha256.clone()?,
+        observation_count: session.trajectory_observation_count?,
+        uncompressed_bytes: session.trajectory_uncompressed_bytes?,
+        compressed_bytes: session.trajectory_compressed_bytes?,
+        finalized_at: session.trajectory_finalized_at?,
+    })
 }
 
 fn to_report_row(scope: &str, strategy: &str, market: &str, aggregate: Aggregate) -> ReportRow {
@@ -911,6 +1251,42 @@ fn directory_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(bytes)
+}
+
+fn parse_env_f64(key: &str, default: f64) -> Result<f64> {
+    match env::var(key) {
+        Ok(value) => value
+            .trim()
+            .parse::<f64>()
+            .with_context(|| format!("{key} doit être un nombre positif"))
+            .and_then(|parsed| {
+                (parsed >= 0.0 && parsed.is_finite())
+                    .then_some(parsed)
+                    .ok_or_else(|| anyhow!("{key} doit être un nombre positif"))
+            }),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_u64(key: &str, default: u64) -> Result<u64> {
+    match env::var(key) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .with_context(|| format!("{key} doit être un entier positif")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_bool(key: &str, default: bool) -> Result<bool> {
+    match env::var(key) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(anyhow!("{key} doit être true ou false")),
+        },
+        Err(_) => Ok(default),
+    }
 }
 
 #[cfg(test)]
