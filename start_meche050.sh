@@ -4,10 +4,34 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-CONFIG_PATH="$ROOT/${MECHE050_CONFIG:-configs/meche050_portfolio.env}"
-ENABLED_PATH="$ROOT/${MECHE050_ENABLED_CONFIG:-configs/meche050_enabled.env}"
-RUNTIME_LOGS="${MECHE050_RUNTIME_LOGS:-logs/meche050}"
-SUPERVISOR_DIR="$ROOT/$RUNTIME_LOGS/supervisor"
+resolve_root_path() {
+  if [[ "$1" == /* ]]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s/%s\n' "$ROOT" "$1"
+  fi
+}
+
+config_value() {
+  local key="$1"
+  local path="$2"
+  [[ -f "$path" ]] || return 0
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      value = substr($0, length(key) + 2)
+      sub(/\r$/, "", value)
+      print value
+      exit
+    }
+  ' "$path"
+}
+
+CONFIG_PATH="$(resolve_root_path "${MECHE050_CONFIG:-configs/meche050_portfolio.env}")"
+CONFIG_ENABLED="$(config_value PORTFOLIO_ENABLED_CONFIG "$CONFIG_PATH")"
+CONFIG_LOGS="$(config_value LOGS_DIR "$CONFIG_PATH")"
+ENABLED_PATH="$(resolve_root_path "${MECHE050_ENABLED_CONFIG:-${CONFIG_ENABLED:-configs/meche050_enabled.env}}")"
+RUNTIME_LOGS="${MECHE050_RUNTIME_LOGS:-${CONFIG_LOGS:-logs/meche050}}"
+SUPERVISOR_DIR="$(resolve_root_path "$RUNTIME_LOGS")/supervisor"
 PID_FILE="$SUPERVISOR_DIR/portfolio_runner.pid"
 LOG_FILE="$SUPERVISOR_DIR/portfolio_runner.console.log"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
