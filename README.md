@@ -169,7 +169,17 @@ chmod +x start_meche050.sh
 ./start_meche050.sh strategy all
 ```
 
-Chaque changement d'activation reecrit atomiquement `configs/meche050_enabled.env` et redemarre le runner unique. Les ordres deja soumis restent persistes dans `logs/meche050/portfolio_state.json` pour leur suivi.
+Pour utiliser un autre profil, `MECHE050_CONFIG` suffit : le lanceur lit automatiquement
+`LOGS_DIR` et `PORTFOLIO_ENABLED_CONFIG` dans ce fichier, donc le journal de supervision, le PID et
+la grille d'activation restent associes a la bonne instance.
+
+```bash
+MECHE050_CONFIG=configs/meche050_forward.env ./start_meche050.sh status
+MECHE050_CONFIG=configs/meche050_forward.env ./start_meche050.sh restart
+```
+
+Chaque changement d'activation reecrit atomiquement la grille associee au profil et redemarre le
+runner unique. Les ordres deja soumis restent persistes dans le `LOGS_DIR` du profil pour leur suivi.
 
 Installer une nouvelle instance systemd depuis le dossier clone courant :
 
