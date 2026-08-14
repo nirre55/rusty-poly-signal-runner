@@ -235,8 +235,40 @@ Fichiers produits :
 | `money_state.json` | État du money management. |
 | `portfolio_state.json` | Ordres combines Meche persistes, incluant les soumissions en cours. |
 | `portfolio_events.jsonl` | Journal structure des fenetres, tailles, ordres et reglements Meche. |
+| `signals.jsonl` | Signaux individuels avant regroupement et sizing. |
+| `session_metrics.jsonl` | Metriques permanentes de touch/fill a 0,50, profondeur, delais, prix et resultat. |
+| `stats_summary.json` | Rapport agrege regenerable par strategie et par marche. |
+| `stream_cleanup.jsonl` | Audit des flux bruts supprimes apres validation des metriques. |
 
 Les fichiers CSV et JSON runtime sous `logs/` sont ignorés par Git.
+
+### Statistiques et espace disque du forward test
+
+Le recorder forward reconstruit le carnet en memoire et ne conserve que les changements utiles
+du meilleur bid/ask, la profondeur disponible a `0,50`, les trades et les evenements de cycle de
+vie. A la fin de chaque session, il ecrit les metriques permanentes avant de supprimer le flux
+compact si `PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY=true`.
+
+Pour convertir les anciennes sessions brutes, produire le rapport, puis recuperer l'espace :
+
+```bash
+chmod +x meche050_recorder_stats.sh
+./meche050_recorder_stats.sh backfill
+./meche050_recorder_stats.sh report
+./meche050_recorder_stats.sh purge
+./meche050_recorder_stats.sh purge --confirm
+./meche050_recorder_stats.sh verify
+```
+
+La premiere commande `purge` est toujours une simulation. La suppression exige `--confirm`,
+ignore les sessions actives et refuse tout fichier situe hors de `logs/meche050-forward/streams`.
+Les fichiers `signals.jsonl`, `signal_sizing.jsonl`, `sessions.jsonl`, `session_metrics.jsonl` et
+`stats_summary.json` ne sont jamais supprimes.
+
+Le rapport distingue `immediate_fak_fills` (liquidite suffisante au moment du signal) et
+`resting_limit_fills` (liquidite suffisante plus tard a `0,50`). La ligne `unique_orders` represente
+le portefeuille reellement groupe; les lignes par strategie attribuent le resultat complet de
+l'ordre a chaque strategie contributrice pour permettre leur comparaison.
 
 ## Reconciliation officielle Polymarket
 

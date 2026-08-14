@@ -360,7 +360,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     &batch,
                     "SKIPPED_NO_BALANCE",
                     json!({"capital_usdc": 0.0}),
-                );
+                )
+                .await;
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_NO_BALANCE",
@@ -375,7 +376,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     &batch,
                     "SKIPPED_BALANCE_ERROR",
                     json!({"error": error.to_string()}),
-                );
+                )
+                .await;
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_BALANCE_ERROR",
@@ -397,7 +399,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
         let key = order_key(&slug, &group.prediction);
         if context.book.has_seen(&key) {
             warn!("Fenêtre dupliquée déjà persistée: {key}");
-            record_all_sizing_updates(context, &batch, "SKIPPED_DUPLICATE", json!({"key": key}));
+            record_all_sizing_updates(context, &batch, "SKIPPED_DUPLICATE", json!({"key": key}))
+                .await;
             log_event(
                 &context.event_path,
                 "WINDOW_SKIPPED_DUPLICATE",
@@ -415,7 +418,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     &batch,
                     "SKIPPED_MARKET_ERROR",
                     json!({"slug": slug, "error": error.to_string()}),
-                );
+                )
+                .await;
                 log_event(
                     &context.event_path,
                     "WINDOW_SKIPPED_MARKET_ERROR",
@@ -452,7 +456,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     "window_budget_usdc": window_budget_usdc,
                     "minimums_total_usdc": total_usdc,
                 }),
-            );
+            )
+            .await;
             warn!(
                 "Fenêtre ignorée: minima {:.2}$ > budget W {:.2}$",
                 total_usdc, window_budget_usdc
@@ -480,7 +485,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                     "capital_usdc": capital_usdc,
                     "minimum_usdc": minimum_usdc,
                 }),
-            );
+            )
+            .await;
             warn!(
                 "Fenetre ignoree: capital disponible {:.2}$ < minimum {:.2}$",
                 capital_usdc, minimum_usdc
@@ -533,7 +539,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                             "fixed_limit_price": FIXED_LIMIT_PRICE,
                             "minimum_shares": MINIMUM_SHARES,
                         }),
-                    );
+                    )
+                    .await;
                 } else {
                     record_sizing_update(
                         context,
@@ -545,7 +552,8 @@ async fn finalize_window(context: &mut WindowContext<'_>, batch: WindowBatch) ->
                             "window_budget_usdc": window_budget_usdc,
                             "skipped_orders": skipped_insufficient_capital_orders,
                         }),
-                    );
+                    )
+                    .await;
                 }
             }
             if minimum_overrides_window {
@@ -829,7 +837,7 @@ fn log_event(path: &Path, event_type: &str, details: serde_json::Value) {
     }
 }
 
-fn record_all_sizing_updates(
+async fn record_all_sizing_updates(
     context: &WindowContext<'_>,
     batch: &WindowBatch,
     disposition: &str,
@@ -842,11 +850,12 @@ fn record_all_sizing_updates(
             signal,
             disposition,
             details.clone(),
-        );
+        )
+        .await;
     }
 }
 
-fn record_sizing_update(
+async fn record_sizing_update(
     context: &WindowContext<'_>,
     entry_time_ms: i64,
     signal: &PortfolioSignal,
@@ -856,7 +865,10 @@ fn record_sizing_update(
     let Some(recorder) = context.recorder else {
         return;
     };
-    if let Err(error) = recorder.record_sizing_update(entry_time_ms, signal, disposition, details) {
+    if let Err(error) = recorder
+        .record_sizing_update(entry_time_ms, signal, disposition, details)
+        .await
+    {
         warn!("Journal sizing signal indisponible: {error:#}");
     }
 }

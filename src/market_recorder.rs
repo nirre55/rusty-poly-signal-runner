@@ -22,6 +22,7 @@ use crate::binance::Candle;
 use crate::config::Config;
 use crate::polymarket::{MarketInfo, PolymarketClient};
 use crate::portfolio::{MarketSlot, PortfolioSignal};
+use crate::recorder_metrics::{SessionAnalyzer, SessionMetricContext};
 use crate::strategy::Prediction;
 
 const MARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -36,6 +37,8 @@ pub struct RecorderSettings {
     pub activation_grace: Duration,
     pub resolution_timeout: Duration,
     pub reconnect_delay: Duration,
+    pub delete_stream_after_summary: bool,
+    pub limit_price: f64,
 }
 
 impl RecorderSettings {
@@ -63,6 +66,11 @@ impl RecorderSettings {
                 "PORTFOLIO_RECORDER_RECONNECT_SECONDS",
                 2,
             )?),
+            delete_stream_after_summary: parse_bool_env(
+                "PORTFOLIO_RECORDER_DELETE_STREAM_AFTER_SUMMARY",
+                false,
+            ),
+            limit_price: parse_f64_env("LIMIT_PRICE_FIXED", 0.50)?,
         })
     }
 }
@@ -198,6 +206,7 @@ impl SignalMarketRecorder {
 
         let detected_at = Utc::now();
         let mut new_signal_ids = Vec::new();
+        let mut activations = BTreeMap::<String, Vec<String>>::new();
         {
             let sessions = self.inner.sessions.lock().await;
             let known = sessions
@@ -245,6 +254,10 @@ impl SignalMarketRecorder {
                     ),
                 };
                 append_jsonl(&self.signals_path(), &record)?;
+                activations
+                    .entry(signal.prediction.to_string())
+                    .or_default()
+                    .push(signal_id.clone());
                 new_signal_ids.push(signal_id);
             }
         }
@@ -265,7 +278,10 @@ impl SignalMarketRecorder {
         self.save_state().await?;
         session
             .tx
-            .send(SessionControl::Activate(new_signal_ids))
+            .send(SessionControl::Activate {
+                detected_at_unix_ms: detected_at.timestamp_millis(),
+                groups: activations,
+            })
             .await
             .map_err(|_| anyhow!("session recorder {} arrêtée", session.persisted.session_id))?;
         Ok(())
@@ -297,13 +313,16 @@ impl SignalMarketRecorder {
     }
 
     /// Appends the final sizing disposition while keeping the detected signal immutable.
-    pub fn record_sizing_update(
+    pub async fn record_sizing_update(
         &self,
         entry_time_ms: i64,
         signal: &PortfolioSignal,
         disposition: &str,
         details: Value,
     ) -> Result<()> {
+        let order_candidate_amount = (disposition == "DRY_RUN_ORDER_CANDIDATE")
+            .then(|| details.get("combined_amount_usdc").and_then(Value::as_f64))
+            .flatten();
         append_jsonl(
             &self.inner.settings.root.join("signal_sizing.jsonl"),
             &json!({
@@ -318,7 +337,29 @@ impl SignalMarketRecorder {
                 "disposition": disposition,
                 "details": details,
             }),
-        )
+        )?;
+        if let Some(amount_usdc) = order_candidate_amount {
+            let key = SessionKey {
+                market: signal.market,
+                entry_time_ms,
+            };
+            let tx = self
+                .inner
+                .sessions
+                .lock()
+                .await
+                .get(&key)
+                .map(|session| session.tx.clone());
+            if let Some(tx) = tx {
+                tx.send(SessionControl::OrderCandidate {
+                    prediction: signal.prediction.to_string(),
+                    amount_usdc,
+                })
+                .await
+                .map_err(|_| anyhow!("session recorder sizing arrêtée: {}", signal.market.key()))?;
+            }
+        }
+        Ok(())
     }
 
     async fn run_scheduler(&self, market: MarketSlot) {
@@ -621,7 +662,14 @@ impl From<&Candle> for CandleRecord {
 }
 
 enum SessionControl {
-    Activate(Vec<String>),
+    Activate {
+        detected_at_unix_ms: i64,
+        groups: BTreeMap<String, Vec<String>>,
+    },
+    OrderCandidate {
+        prediction: String,
+        amount_usdc: f64,
+    },
     BinanceResult(CandleRecord),
     Discard,
 }
@@ -634,11 +682,15 @@ struct StreamEnvelope {
     sequence: u64,
     received_at_local: DateTime<Utc>,
     received_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     server_timestamp: Option<String>,
     server_timestamp_out_of_order: bool,
     event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     market: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     asset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     raw_text: Option<String>,
     payload: Value,
 }
@@ -702,6 +754,7 @@ struct SessionWorker {
     binance_result: Option<CandleRecord>,
     resolution: Option<ResolutionRecord>,
     write_failed: bool,
+    analyzer: SessionAnalyzer,
 }
 
 #[derive(Default)]
@@ -739,6 +792,12 @@ impl SessionWorker {
         } else {
             RecoveredStreamStats::default()
         };
+        let analyzer = SessionAnalyzer::new(
+            persisted.market_info.up_token_id.clone(),
+            persisted.market_info.down_token_id.clone(),
+            settings.limit_price,
+            persisted.market_info.order_min_size,
+        );
         Self {
             persisted,
             settings,
@@ -759,6 +818,7 @@ impl SessionWorker {
             binance_result: None,
             resolution: None,
             write_failed: false,
+            analyzer,
         }
     }
 
@@ -865,7 +925,12 @@ impl SessionWorker {
                 tokio::select! {
                     control = self.controls.recv() => {
                         match control {
-                            Some(SessionControl::Activate(ids)) => self.activate(ids).await,
+                            Some(SessionControl::Activate { detected_at_unix_ms, groups }) => {
+                                self.activate(detected_at_unix_ms, groups).await
+                            }
+                            Some(SessionControl::OrderCandidate { prediction, amount_usdc }) => {
+                                self.analyzer.set_order_candidate(&prediction, amount_usdc);
+                            }
                             Some(SessionControl::BinanceResult(candle)) => {
                                 self.binance_result = Some(candle);
                                 self.capture_internal("binance_result", json!({"available": true})).await;
@@ -884,12 +949,41 @@ impl SessionWorker {
                                 let event_type = event_type(&parsed);
                                 let contains_book = payload_contains_event(&parsed, "book");
                                 let contains_resolution = payload_contains_event(&parsed, "market_resolved");
-                                self.capture_with_connection(
-                                    &connection_id,
-                                    &event_type,
-                                    parsed.clone(),
-                                    Some(raw),
-                                ).await;
+                                *self.counts.entry(event_type).or_default() += 1;
+                                let server_timestamp = extract_string(&parsed, "timestamp");
+                                for event in self
+                                    .analyzer
+                                    .process_payload(&parsed, Utc::now().timestamp_millis())
+                                {
+                                    self.capture_compact(
+                                        &connection_id,
+                                        event.event_type,
+                                        event.payload,
+                                        event.asset_id,
+                                        event.server_timestamp.or_else(|| server_timestamp.clone()),
+                                    )
+                                    .await;
+                                }
+                                if contains_resolution {
+                                    self.capture_compact(
+                                        &connection_id,
+                                        "market_resolved",
+                                        compact_resolution_payload(&parsed),
+                                        None,
+                                        server_timestamp.clone(),
+                                    )
+                                    .await;
+                                }
+                                if payload_contains_event(&parsed, "tick_size_change") {
+                                    self.capture_compact(
+                                        &connection_id,
+                                        "tick_size_change",
+                                        compact_tick_size_payload(&parsed),
+                                        extract_string(&parsed, "asset_id"),
+                                        server_timestamp,
+                                    )
+                                    .await;
+                                }
                                 if needs_snapshot && contains_book {
                                     needs_snapshot = false;
                                     self.capture_with_connection(
@@ -961,8 +1055,12 @@ impl SessionWorker {
             _ = tokio::time::sleep(self.settings.reconnect_delay) => false,
             control = self.controls.recv() => {
                 match control {
-                    Some(SessionControl::Activate(ids)) => {
-                        self.activate(ids).await;
+                    Some(SessionControl::Activate { detected_at_unix_ms, groups }) => {
+                        self.activate(detected_at_unix_ms, groups).await;
+                        false
+                    }
+                    Some(SessionControl::OrderCandidate { prediction, amount_usdc }) => {
+                        self.analyzer.set_order_candidate(&prediction, amount_usdc);
                         false
                     }
                     Some(SessionControl::BinanceResult(candle)) => {
@@ -975,10 +1073,12 @@ impl SessionWorker {
         }
     }
 
-    async fn activate(&mut self, ids: Vec<String>) {
-        for id in ids {
-            if !self.signal_ids.contains(&id) {
-                self.signal_ids.push(id);
+    async fn activate(&mut self, detected_at_unix_ms: i64, groups: BTreeMap<String, Vec<String>>) {
+        for ids in groups.values() {
+            for id in ids {
+                if !self.signal_ids.contains(id) {
+                    self.signal_ids.push(id.clone());
+                }
             }
         }
         if self.active && self.writer.is_some() {
@@ -996,6 +1096,21 @@ impl SessionWorker {
                 error!("Flush pré-signal {}: {err:#}", self.persisted.slug);
                 self.write_failed = true;
                 break;
+            }
+        }
+        for (prediction, ids) in groups {
+            if let Some(event) = self
+                .analyzer
+                .activate(&prediction, ids, detected_at_unix_ms)
+            {
+                self.capture_compact(
+                    "internal",
+                    event.event_type,
+                    event.payload,
+                    event.asset_id,
+                    event.server_timestamp,
+                )
+                .await;
             }
         }
         self.capture_internal(
@@ -1036,13 +1151,27 @@ impl SessionWorker {
         payload: Value,
         raw_text: Option<String>,
     ) {
-        self.sequence += 1;
         *self
             .counts
             .entry(derived_event_type.to_string())
             .or_default() += 1;
+        self.capture_compact(connection_id, derived_event_type, payload, None, None)
+            .await;
+        let _ = raw_text;
+    }
+
+    async fn capture_compact(
+        &mut self,
+        connection_id: &str,
+        derived_event_type: &str,
+        payload: Value,
+        asset_id: Option<String>,
+        explicit_server_timestamp: Option<String>,
+    ) {
+        self.sequence += 1;
         let received_at = Utc::now();
-        let server_timestamp = extract_string(&payload, "timestamp");
+        let server_timestamp =
+            explicit_server_timestamp.or_else(|| extract_string(&payload, "timestamp"));
         let server_timestamp_ms = server_timestamp
             .as_deref()
             .and_then(|timestamp| timestamp.parse::<i64>().ok());
@@ -1068,8 +1197,8 @@ impl SessionWorker {
             server_timestamp_out_of_order: out_of_order,
             event_type: derived_event_type.to_string(),
             market: extract_string(&payload, "market"),
-            asset_id: extract_string(&payload, "asset_id"),
-            raw_text,
+            asset_id: asset_id.or_else(|| extract_string(&payload, "asset_id")),
+            raw_text: None,
             payload,
         };
         if self.active {
@@ -1096,8 +1225,9 @@ impl SessionWorker {
     }
 
     async fn finalize(&mut self) {
-        if let Some(writer) = self.writer.as_mut() {
+        if let Some(mut writer) = self.writer.take() {
             let _ = writer.flush().await;
+            let _ = writer.shutdown().await;
         }
         let completion_status = if self.write_failed {
             "RECORDER_FAILED"
@@ -1110,6 +1240,48 @@ impl SessionWorker {
         } else {
             "RESOLUTION_TIMEOUT"
         };
+        let metrics_path = self.settings.root.join("session_metrics.jsonl");
+        let metrics = self.analyzer.clone().finish(SessionMetricContext {
+            source_format: "runtime_compact_v2".to_string(),
+            session_id: self.persisted.session_id.clone(),
+            market_slot: self.persisted.key.market.key().to_string(),
+            entry_time_ms: self.persisted.key.entry_time_ms,
+            slug: self.persisted.slug.clone(),
+            winning_asset_id: self
+                .resolution
+                .as_ref()
+                .and_then(|resolution| resolution.winning_asset_id.clone()),
+            winning_outcome: self
+                .resolution
+                .as_ref()
+                .and_then(|resolution| resolution.winning_outcome.clone()),
+            raw_stream_path: Some(self.persisted.stream_path.to_string_lossy().into_owned()),
+            completion_status: completion_status.to_string(),
+            gap_count: self.gap_count,
+            reconnect_count: self.reconnect_count,
+        });
+        let metrics_saved = match append_jsonl(&metrics_path, &metrics) {
+            Ok(()) => true,
+            Err(err) => {
+                error!("Métriques recorder non sauvegardées: {err:#}");
+                false
+            }
+        };
+        let mut raw_stream_deleted = false;
+        if metrics_saved && self.settings.delete_stream_after_summary {
+            match tokio::fs::remove_file(&self.persisted.stream_path).await {
+                Ok(()) => raw_stream_deleted = true,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    raw_stream_deleted = true;
+                }
+                Err(err) => warn!(
+                    "Stream compact conservé {}: {err}",
+                    self.persisted.stream_path.display()
+                ),
+            }
+        }
+        let retained_stream_path = (!raw_stream_deleted)
+            .then(|| self.persisted.stream_path.to_string_lossy().into_owned());
         let summary = json!({
             "schema_version": SCHEMA_VERSION,
             "record_type": "SESSION_FINALIZED",
@@ -1130,7 +1302,9 @@ impl SessionWorker {
             "resolution": self.resolution,
             "binance_target_candle": self.binance_result,
             "completion_status": completion_status,
-            "raw_stream_path": self.persisted.stream_path,
+            "metrics_path": metrics_path,
+            "raw_stream_path": retained_stream_path,
+            "raw_stream_deleted": raw_stream_deleted,
         });
         if let Err(err) = append_jsonl(&self.settings.root.join("sessions.jsonl"), &summary) {
             error!("Résumé recorder non sauvegardé: {err:#}");
@@ -1191,6 +1365,25 @@ fn resolution_from_payload(payload: &Value) -> ResolutionRecord {
             .or_else(|| extract_string(payload, "outcome")),
         observed_at_local: Utc::now(),
     }
+}
+
+fn compact_resolution_payload(payload: &Value) -> Value {
+    json!({
+        "winning_asset_id": extract_string(payload, "winning_asset_id")
+            .or_else(|| extract_string(payload, "asset_id")),
+        "winning_outcome": extract_string(payload, "winning_outcome")
+            .or_else(|| extract_string(payload, "outcome")),
+        "timestamp": extract_string(payload, "timestamp"),
+    })
+}
+
+fn compact_tick_size_payload(payload: &Value) -> Value {
+    json!({
+        "asset_id": extract_string(payload, "asset_id"),
+        "old_tick_size": extract_string(payload, "old_tick_size"),
+        "new_tick_size": extract_string(payload, "new_tick_size"),
+        "timestamp": extract_string(payload, "timestamp"),
+    })
 }
 
 fn signal_id(signal: &PortfolioSignal, entry_time_ms: i64) -> String {
@@ -1299,6 +1492,16 @@ fn parse_u64_env(key: &str, default: u64) -> Result<u64> {
             .trim()
             .parse::<u64>()
             .with_context(|| format!("{key} doit être un entier positif")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_f64_env(key: &str, default: f64) -> Result<f64> {
+    match env::var(key) {
+        Ok(value) => value
+            .trim()
+            .parse::<f64>()
+            .with_context(|| format!("{key} doit être un nombre positif")),
         Err(_) => Ok(default),
     }
 }
