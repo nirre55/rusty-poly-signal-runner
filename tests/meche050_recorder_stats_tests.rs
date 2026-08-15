@@ -118,6 +118,7 @@ async fn compressed_shared_trajectory_generates_temporal_and_risk_reports() {
     assert_eq!(trio["overall"]["crossed_below_0_50"], 1);
 
     let risk = read_json(&logs.join("stats/risk/global_majority.json"));
+    assert_eq!(risk["schema_version"], 2);
     assert_approx(
         risk["overall"]["maximum_drawdown"]["maximum"]
             .as_f64()
@@ -129,6 +130,49 @@ async fn compressed_shared_trajectory_generates_temporal_and_risk_reports() {
             .as_f64()
             .unwrap(),
         0.02,
+    );
+    let winner_adverse = &risk["overall"]["winning_trade_adverse_excursion"];
+    assert_approx(
+        winner_adverse["lowest_best_bid"]["mean"].as_f64().unwrap(),
+        0.40,
+    );
+    assert_approx(
+        winner_adverse["drop_from_0_50"]["median"].as_f64().unwrap(),
+        0.10,
+    );
+    assert_approx(
+        winner_adverse["drop_pct_from_0_50"]["mean"]
+            .as_f64()
+            .unwrap(),
+        20.0,
+    );
+    assert_approx(
+        winner_adverse["unrealized_pnl_5_shares_usdc"]["median"]
+            .as_f64()
+            .unwrap(),
+        -0.50,
+    );
+    assert_approx(
+        winner_adverse["time_to_low_seconds"]["mean"]
+            .as_f64()
+            .unwrap(),
+        15.0,
+    );
+
+    let all_signals = read_json(&logs.join("stats/risk/global_all_signals.json"));
+    let boll_risk = read_json(&logs.join("stats/risk/boll_fade.json"));
+    let trio_risk = read_json(&logs.join("stats/risk/trio_vote2.json"));
+    let streak_risk = read_json(&logs.join("stats/risk/streak_rsi.json"));
+    assert_eq!(
+        (
+            all_signals["overall"]["winning_trade_adverse_excursion"]["winning_trades"].as_u64(),
+            boll_risk["overall"]["winning_trade_adverse_excursion"]["winning_trades"].as_u64(),
+            boll_risk["by_market"]["btc_5m"]["winning_trade_adverse_excursion"]["winning_trades"]
+                .as_u64(),
+            trio_risk["overall"]["winning_trade_adverse_excursion"]["winning_trades"].as_u64(),
+            streak_risk["overall"]["winning_trade_adverse_excursion"]["winning_trades"].as_u64(),
+        ),
+        (Some(2), Some(1), Some(1), Some(1), Some(0))
     );
 
     for scope in [
