@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::trajectory_analysis::{
     analyze_outcome, load_trajectory_events, ExitCheckpoint, ExitCostAssumptions,
-    OutcomeTrajectoryAnalysis, ThresholdPath, ABOVE_THRESHOLDS, BELOW_THRESHOLDS, RISK_HORIZONS_MS,
+    OutcomeTrajectoryAnalysis, ThresholdPath, TimedPrice, ABOVE_THRESHOLDS, BELOW_THRESHOLDS,
+    RISK_HORIZONS_MS,
 };
 
 const ENTRY_DEADLINES_MS: [(&str, i64); 6] = [
@@ -137,6 +138,7 @@ pub struct RiskStats {
     loss_rate_pct: f64,
     loss_rate_confidence_95_pct: ConfidenceInterval,
     sample_warning: bool,
+    winning_trade_adverse_excursion: WinningAdverseExcursionStats,
     mae_best_bid: DistributionStats,
     mae_pnl_5_usdc: DistributionStats,
     mae_time_seconds: DistributionStats,
@@ -150,6 +152,17 @@ pub struct RiskStats {
     horizons: BTreeMap<String, RiskHorizonStats>,
     adverse_thresholds: BTreeMap<String, ThresholdStats>,
     favorable_thresholds: BTreeMap<String, ThresholdStats>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct WinningAdverseExcursionStats {
+    winning_trades: u64,
+    lowest_best_bid: DistributionStats,
+    drop_from_0_50: DistributionStats,
+    drop_pct_from_0_50: DistributionStats,
+    unrealized_pnl_5_shares_usdc: DistributionStats,
+    time_to_low_seconds: DistributionStats,
+    sample_warning: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -416,7 +429,7 @@ fn build_risk_report(
     settings: ReportSettings,
 ) -> RiskReport {
     RiskReport {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: Utc::now(),
         scope: scope.to_string(),
         minimum_sample_size: settings.minimum_sample_size,
@@ -577,6 +590,7 @@ struct RiskAccumulator {
     no_fill: u64,
     wins: u64,
     losses: u64,
+    winning_adverse_excursion: WinningAdverseExcursionAccumulator,
     mae: Vec<f64>,
     mae_pnl: Vec<f64>,
     mae_times: Vec<f64>,
@@ -617,7 +631,11 @@ impl RiskAccumulator {
         };
         self.strict_fills += 1;
         match trade.winning {
-            Some(true) => self.wins += 1,
+            Some(true) => {
+                self.wins += 1;
+                self.winning_adverse_excursion
+                    .add(risk.mae_best_bid.as_ref());
+            }
             Some(false) => self.losses += 1,
             None => {}
         }
@@ -675,6 +693,9 @@ impl RiskAccumulator {
             loss_rate_pct: percentage(self.losses, resolved),
             loss_rate_confidence_95_pct: wilson_interval(self.losses, resolved),
             sample_warning: resolved < minimum_sample_size,
+            winning_trade_adverse_excursion: self
+                .winning_adverse_excursion
+                .finish(minimum_sample_size),
             mae_best_bid: distribution(self.mae),
             mae_pnl_5_usdc: distribution(self.mae_pnl),
             mae_time_seconds: distribution(self.mae_times),
@@ -706,6 +727,44 @@ impl RiskAccumulator {
                     (name.to_string(), accumulator.finish(minimum_sample_size))
                 })
                 .collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct WinningAdverseExcursionAccumulator {
+    winning_trades: u64,
+    lowest_best_bids: Vec<f64>,
+    drops_from_half: Vec<f64>,
+    drop_percentages: Vec<f64>,
+    unrealized_pnls: Vec<f64>,
+    times_to_low: Vec<f64>,
+}
+
+impl WinningAdverseExcursionAccumulator {
+    fn add(&mut self, mae: Option<&TimedPrice>) {
+        let Some(mae) = mae else {
+            return;
+        };
+        self.winning_trades += 1;
+        let drop = (0.50 - mae.value).max(0.0);
+        self.lowest_best_bids.push(mae.value);
+        self.drops_from_half.push(drop);
+        self.drop_percentages.push(drop / 0.50 * 100.0);
+        self.unrealized_pnls.push(-drop * 5.0);
+        self.times_to_low
+            .push(mae.elapsed_from_fill_ms as f64 / 1_000.0);
+    }
+
+    fn finish(self, minimum_sample_size: u64) -> WinningAdverseExcursionStats {
+        WinningAdverseExcursionStats {
+            winning_trades: self.winning_trades,
+            lowest_best_bid: distribution(self.lowest_best_bids),
+            drop_from_0_50: distribution(self.drops_from_half),
+            drop_pct_from_0_50: distribution(self.drop_percentages),
+            unrealized_pnl_5_shares_usdc: distribution(self.unrealized_pnls),
+            time_to_low_seconds: distribution(self.times_to_low),
+            sample_warning: self.winning_trades < minimum_sample_size,
         }
     }
 }
@@ -1002,7 +1061,7 @@ fn hold_pnl_5(winning: bool) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{distribution, percentile, wilson_interval};
+    use super::{distribution, percentile, wilson_interval, WinningAdverseExcursionAccumulator};
 
     #[test]
     fn percentile_interpolates_even_sample_median() {
@@ -1023,5 +1082,22 @@ mod tests {
         let interval = wilson_interval(0, 0);
 
         assert!(interval.lower.is_none());
+    }
+
+    #[test]
+    fn winning_adverse_excursion_warns_and_stays_empty_without_measurable_winner() {
+        let mut accumulator = WinningAdverseExcursionAccumulator::default();
+        accumulator.add(None);
+
+        let stats = accumulator.finish(30);
+
+        assert_eq!(
+            (
+                stats.winning_trades,
+                stats.lowest_best_bid.count,
+                stats.sample_warning,
+            ),
+            (0, 0, true)
+        );
     }
 }

@@ -388,6 +388,34 @@ resultats sont ventiles par strategie, marche, direction et nombre de votes conc
 un groupe de moins de 30 observations completes produit un avertissement et ne devient jamais une
 recommandation ; le seuil utilise est inscrit dans chaque rapport.
 
+##### Baisse adverse des trades gagnants
+
+La version 2 du schema des rapports de risque ajoute un bloc
+`winning_trade_adverse_excursion`. Il mesure uniquement les positions strictement remplies a `0,50`
+qui finissent gagnantes. Pour chaque position, le point bas est le meilleur bid executable minimal
+observe entre le fill strict et la cloture de la fenetre. Le resultat final sert uniquement a classer
+la trajectoire apres resolution ; il n'intervient jamais dans le calcul du point bas.
+
+Le bloc contient le nombre de gagnants analyses, un avertissement sous le seuil minimal
+d'echantillon et les distributions suivantes :
+
+- `lowest_best_bid` : meilleur bid executable minimal ;
+- `drop_from_0_50` : `max(0, 0,50 - lowest_best_bid)` en points de prix ;
+- `drop_pct_from_0_50` : baisse precedente rapportee a `0,50`, en pourcentage ;
+- `unrealized_pnl_5_shares_usdc` : PnL latent au point bas pour 5 shares, donc une valeur negative
+  ou nulle calculee par `(lowest_best_bid - 0,50) * 5` ;
+- `time_to_low_seconds` : temps entre le fill strict et ce point bas.
+
+Chaque distribution publie le nombre d'observations, la moyenne, la mediane, le minimum, le
+maximum et les percentiles P25, P75, P90 et P95. Le bloc apparait dans `overall`, `by_market`,
+`by_direction`, `by_result` et `by_concordant_votes` des six rapports de risque. Il est donc
+disponible separement dans `boll_fade.json`, `streak_rsi.json`, `trio_vote2.json` et
+`reversal_pro.json`, notamment pour `btc_5m`, `eth_5m`, `btc_15m` et `eth_15m`. Les rapports
+`global_all_signals.json` et `global_majority.json` conservent la meme mesure pour comparaison.
+
+Les champs de la version 1 restent inchanges. Un groupe sans trade gagnant publie un compteur nul,
+des distributions vides et `sample_warning: true`.
+
 #### Qualite, anti-lookahead et tests
 
 Une session incomplete ou contenant un trou de donnees n'est jamais classee silencieusement comme
